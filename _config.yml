@@ -103,7 +103,8 @@ deploy:
 backup:
   type: git
   repository:
-      github: git@github.com:ashimidashajia/MyBlog-back.git
+      github: git@github.com:ashimidashajia/MyBlog-back.git,master
+
 
 
 
