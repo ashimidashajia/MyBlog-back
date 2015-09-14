@@ -3,17 +3,18 @@
 ## Source: https://github.com/hexojs/hexo/
 
 # Site
-title: Hexo
-subtitle:
+title: 码农故事
+subtitle: 不断成长的见证
 description:
-author: John Doe
+author: genglei.cuan
 language:
 timezone:
 
 # URL
 ## If your site is put in a subdirectory, set url as 'http://yoursite.com/child' and root as '/child/'
-url: http://yoursite.com
+url: http://www.iloveandroid.com
 root: /
+#文章永久连接格式
 permalink: :year/:month/:day/:title/
 permalink_defaults:
 
@@ -24,7 +25,9 @@ tag_dir: tags
 archive_dir: archives
 category_dir: categories
 code_dir: downloads/code
+#国际化文件夹
 i18n_dir: :lang
+#跳过指定文件的渲染，您可使用 glob 来配置路径
 skip_render:
 
 # Writing
@@ -32,6 +35,7 @@ new_post_name: :title.md # File name of new posts
 default_layout: post
 titlecase: false # Transform title into titlecase
 external_link: true # Open external links in new tab
+# 把文件名称转换为 1小写或大写 0
 filename_case: 0
 render_drafts: false
 post_asset_folder: false
