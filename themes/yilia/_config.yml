@@ -2,6 +2,7 @@
 menu:
   主页: /
   所有文章: /archives
+  linux基础: /categories/linux基础
   # 随笔: /tags/随笔
 
 # SubNav
@@ -58,6 +59,6 @@ friends:
 
 #是否开启“关于我”。
 #不开启——
-aboutme: false
+#aboutme: false
 #开启——
 aboutme: 码农的成长之路，不要让昨日的悲伤，浪费今天的眼泪。

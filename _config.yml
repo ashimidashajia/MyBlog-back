@@ -7,7 +7,7 @@ title: 码农故事
 subtitle: 不断成长的见证
 description:
 author: genglei.cuan
-language:
+language: zh-EN
 timezone:
 
 # URL
@@ -37,10 +37,15 @@ titlecase: false # Transform title into titlecase
 external_link: true # Open external links in new tab
 # 把文件名称转换为 1小写或大写 0
 filename_case: 0
+#显示草稿
 render_drafts: false
+#启动 Asset 文件夹
 post_asset_folder: false
+#把链接改为与根目录的相对位址
 relative_link: false
+#显示未来的文章
 future: true
+#代码块高亮设置
 highlight:
   enable: true
   line_number: true
@@ -69,6 +74,25 @@ pagination_dir: page
 ## Themes: http://hexo.io/themes/
 theme: yilia
 
+
+
+#####################################
+index_generator:
+  per_page: 10 ##首页默认10篇文章标题 如果值为0不分页
+
+archive_generator:
+    per_page: 10 ##归档页面默认10篇文章标题
+    yearly: true  ##生成年视图
+    monthly: true ##生成月视图
+
+tag_generator:
+    per_page: 10 ##标签分类页面默认10篇文章
+
+category_generator: 
+    per_page: 10 ###分类页面默认10篇文章
+
+
+#####################################
 # Deployment
 ## Docs: http://hexo.io/docs/deployment.html
 deploy: 
@@ -80,4 +104,6 @@ backup:
   type: git
   repository:
       github: git@github.com:ashimidashajia/MyBlog-back.git
+
+
 
