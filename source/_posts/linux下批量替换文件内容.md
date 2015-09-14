@@ -1,13 +1,10 @@
 ---
 layout: post
 title: linux下批量替换文件内容
-category: linux基础
+categories: linux基础
+tags: linux常用命令
+
 ---
-
-# linux下批量替换文件内容
-
-标签： linux
-
 ---
 ## demo
 
