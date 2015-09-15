@@ -4,13 +4,14 @@ menu:
   所有文章: /archives
   linux基础: /categories/linux基础
   Android底层开发: /categories/Android底层开发
+  项目管理: /categories/项目管理
   随笔: /categories/随笔
 
 
 # SubNav
 subnav:
-  github: "https://github.com/ashimidashajia"
-  weibo: "http://weibo.com/u/5324408874"
+    # github: "https://github.com/ashimidashajia"
+    #weibo: "http://weibo.com/u/5324408874"
   #rss: "#"
   #zhihu: "#"
   #douban: "#"

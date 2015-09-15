@@ -1,0 +1,42 @@
+---
+layout: post
+title: 构建神器Gradle学习资料
+categories: 项目管理
+tags: [Gradle,构建]
+
+---
+
+谷歌官方推出的Android开发工具Android Studio自带的构建工具是Gradle,号称构建神器。所以很有必要学习如何使用这个神器帮助我们构建大型项目。
+
+<!--more-->
+网上关于Gradle的学习资料也很多，这里我列举一下我学习的时候看的一些资料。
+
+邓凡平大神最近写了一篇关于Gradle的学习博客：[深入理解Android之Gradle][1]，个人觉得可以大大提高学习Gradle的效率。
+
+Gradle基于Groovy语言，其[官方文档][6]
+
+Gradle官方资料：
+
+从[Gradle官方][2]下载gradle最新版安装包，是一个压缩包，解压即可使用。里面包括了十分重要的离线文档，如下图所示
+
+![Gradle官方离线文档][3]
+
+
+谷歌Android studio gradle 插件官方资料：
+
+[Android Plugin for Gradle][4],仅仅简单的介绍了插件的用法，在该网页右面有一个离线帮助文档的下载包链接，这也是学习利用gradle构建android项目的绝佳资料。可能需要翻墙，这里给出我上传的链接。
+
+[Android Plugin for Gradle doc][5]:点击下载，记住将txt后缀改为zip.
+
+
+
+先通读邓凡平大神的博客，对Gradle有个基础的认识，接下来就是结合官方帮助文档，动手实践了，千万不要花大量时间看网上找资料。接下来几篇文章就开始通过动手实践，逐步掌握Gradle的基本用法。
+
+
+
+  [1]: http://blog.csdn.net/innost/article/details/48228651
+  [2]: http://gradle.org/
+  [3]: http://7xj6ce.com1.z0.glb.clouddn.com/gradle-study-doc.png
+  [4]: https://developer.android.com/tools/building/plugin-for-gradle.html
+  [5]: http://7xj6ce.com1.z0.glb.clouddn.com/android-gradle-plugin-dsl(将txt改为zip).txt
+  [6]: http://www.groovy-lang.org/api.html

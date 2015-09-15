@@ -18,6 +18,10 @@ root: /
 permalink: :year/:month/:day/:title/
 permalink_defaults:
 
+#sitemap
+sitemap:
+  path: sitemap.xml
+
 # Directory
 source_dir: source
 public_dir: public
