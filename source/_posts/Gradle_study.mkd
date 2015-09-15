@@ -26,7 +26,7 @@ Gradle官方资料：
 
 [Android Plugin for Gradle][4],仅仅简单的介绍了插件的用法，在该网页右面有一个离线帮助文档的下载包链接，这也是学习利用gradle构建android项目的绝佳资料。可能需要翻墙，这里给出我上传的链接。
 
-[Android Plugin for Gradle doc][5]:点击下载，记住将txt后缀改为zip.
+[Android Plugin for Gradle doc][5] 右键另存为.
 
 
 
@@ -38,5 +38,5 @@ Gradle官方资料：
   [2]: http://gradle.org/
   [3]: http://7xj6ce.com1.z0.glb.clouddn.com/gradle-study-doc.png
   [4]: https://developer.android.com/tools/building/plugin-for-gradle.html
-  [5]: http://7xj6ce.com1.z0.glb.clouddn.com/android-gradle-plugin-dsl(将txt改为zip).txt
+  [5]: http://7xj6ce.com1.z0.glb.clouddn.com/android-gradle-plugin-dsl.zip
   [6]: http://www.groovy-lang.org/api.html

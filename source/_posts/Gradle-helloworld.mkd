@@ -1,0 +1,199 @@
+---
+layout: post
+title: 利用Gradle从零开始构建一个Android App工程
+categories: 项目管理
+tags: [Gradle,构建]
+
+---
+
+<font color = "#ff558">原创文章，转载请说明出处</font>
+
+
+### 创建Android App工程
+
+利用Android sdk提供的命令，在命令行中创建一个Android app工程
+
+```bash
+android create project --target android-22 --name MyTestApp --path /home/shajia/work/mytest/test/MyTestApp \
+--activity MyActivity --package com.example.mytestapp
+```
+<!--more-->
+我这里SDK已经同步到Android 5.1.1,即Android-22，请根据自己的实际情况，修改上面命令。
+
+
+### 初始化Gradle环境
+
+请首先确保本地已经安装好最新版本Gradle，直接从Gradle官网下载即可，可以参考上一篇博客。
+
+因为从最新版Android studio创建的Android 项目中可知其使用的是gradle 2.4版本，所以为了兼容Android gradle插件，我们也要利用gradle 2.4构建我们的Android 项目。进入到刚刚创建的Android工程文件夹中去，然后执行下面的命令
+
+```bash
+gradle wrapper --gradle-version 2.4
+
+```
+
+执行上述命令后，会产生如下文件
+
+```
+├── gradle
+│   └── wrapper
+│       ├── gradle-wrapper.jar
+│       └── gradle-wrapper.properties
+├── gradlew
+└── gradlew.bat
+```
+这个命令产生的文件是对gradle的封装，作用非常大。比如说公司里面XXX创建了一个项目，并且利用gradle构建，那么别人拿到他的代码后，只需要在本地执行./gradlew命令，变可以在本地搭建出和项目创建者一模一样的gradle构建环境了，这样可以避免开发人员因为gradle版本的差异导致的不可预料的问题了。
+
+
+做以下修改，查看通过Android studio创建的项目，都是下载的gradle-2.4-all.zip,所以我们也做这样的修改吧。
+```
+distributionUrl=https\://services.gradle.org/distributions/gradle-2.4-bin.zip
+将bin修改为all
+distributionUrl=https\://services.gradle.org/distributions/gradle-2.4-all.zip
+```
+然后执行
+```
+./gradlew -version
+```
+会自动下载gradle 2.4版本，并且配置好环境，看到下面的信息，说明配置OK
+
+```bash
+------------------------------------------------------------
+Gradle 2.4
+------------------------------------------------------------
+
+Build time:   2015-05-05 08:09:24 UTC
+Build number: none
+Revision:     5c9c3bc20ca1c281ac7972643f1e2d190f2c943c
+
+Groovy:       2.3.10
+Ant:          Apache Ant(TM) version 1.9.4 compiled on April 29 2014
+JVM:          1.7.0_79 (Oracle Corporation 24.79-b02)
+OS:           Linux 3.16.0-38-generic amd64
+
+```
+
+### 利用gradle 构建Android项目
+
+经过前面步骤后，目录中有如下图所示的文件夹
+
+![项目文件夹][1]
+
+如果对Gradle有所了解的话，应该知道利用Gradle构建的话，一定要有build.gradle文件，这里我们先不考虑多工程构建，所以可以没有settings.gradle.在这个文件夹中创建build.gradle,内容如下
+
+```bash
+/*设置脚本运行环境*/
+buildscript{
+    println '------buildscript configire phase---------'
+    repositories {
+        jcenter()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:1.3.0'
+
+    }
+
+}
+
+/*为所有项目设置通用的选项*/
+allprojects {
+    /*查看该行信息打印的次数，应该是有几个项目（有几个build.gradle文件），打印几次*/
+    println '----------allprojects configure phase---------'
+    repositories {
+        jcenter()
+    }
+}
+
+task clean(type:Delete){
+    println '---------- clean configure phase-----------'
+    delete rootProject.buildDir
+
+}
+```
+
+然后执行下面的命令，就可以看到已经有一些任务了。--daemon参数可以开启守护进程，加速构建
+
+```
+./gradlew tasks --daemon
+```
+
+继续改造build.gradle。添加Android gradle插件。
+
+```
+/*
+    引入编译app的插件
+    参考官方文档android-gradle-plugin-dsl//com.android.build.gradle.AppExtension.html
+    可知有两个参数是必须设置的
+    buildToolsVersion
+    compileSdkVersion
+    都是string 类型
+*/
+
+apply plugin: 'com.android.application'
+```
+
+除了上面提到的两个必须设置的参数外，我们还要告诉Gradle，我们的Android app java 源码在哪里，res资源在哪里，AndroidManifest.xml在哪里。
+
+```bash
+/*设置编译Android项目的参数*/
+
+android {
+    println '---------android configure phase --------'
+    buildToolsVersion "22.0.1"
+    compileSdkVersion "android-22"
+
+    sourceSets{
+        main{
+           /*
+                路径为build.gradle为基准的相对路径
+                指定到包名起始路径即可
+                设置java代码路径
+            */
+           java.srcDirs 'src'
+ 
+          /* 设置res资源路径
+            换了一种写法
+            */
+           res {
+               srcDirs 'res'
+           }
+        /*指定manifest路径*/
+          manifest.srcFile 'AndroidManifest.xml'
+        }
+
+    }
+}
+```
+然后再次执行
+
+```
+./gradlew tasks --daemon
+```
+可以看到多了许多关于Android相关的任务，如下图所示：
+
+![android task][2]
+
+执行下面的命令，开始编译Android项目。
+```
+./gradlew build --daemon
+```
+
+编译成功后，打开模拟器或者链接真机，执行下面的命令安装apk
+
+```
+./gradlew installDebug
+```
+如下图所示，已经成功安装到模拟器上了。
+![安装Apk][3]
+
+这里提供的一个包含settings.gradle的demo源码包，仅仅是将利用命令行创建的Android项目产生的文件除了local.properties，其余都拷贝到app目录，另外在app目录下在创建一个build.gradle。里面加入了打印信息，结合邓凡平[深入理解Android之Gradle][4],可以更深刻理解gradle中初始化阶段，配置阶段以及执行阶段。
+
+[demo源码包][5] 右键另存为。
+
+后续更精彩，敬请期待。
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/gradle-helloworld-1.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/gradle-helloworld-2.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/gradle-helloworld-3.png
+[4]: http://blog.csdn.net/innost/article/details/48228651
+[5]: http://7xj6ce.com1.z0.glb.clouddn.com/MyTestApp.zip
