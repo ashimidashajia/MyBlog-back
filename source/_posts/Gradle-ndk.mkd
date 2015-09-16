@@ -1,0 +1,288 @@
+---
+layout: post
+title: 让Gradleg构建支持NDK
+categories: 项目管理
+tags: [Gradle,构建]
+
+---
+
+原本google公司承诺Android studio 1.3开始支持NDK,但是现在已经到Android studio 1.4 beat 3了，对NDK的支持还是实验性的。那么既然已经对Gradle的有了了解了，那索性就学着添加相关的task让利用$NDK/ndk-build命令编译。
+
+<!--more-->
+这里的思路是屏蔽Android Gradle插件中对NDK支持的部分，因为还仅仅是实验阶段的功能，所以并不完善。如果不屏蔽的话，还会干扰我们添加的对NDK编译的task执行。
+
+按照正常的NDK编译流程，是需要Android.mk和Application.mk这两个文件的。
+
+Application.mk目的是描述在你的应用程序中所需要的模块(即静态库或动态库)。Application.mk文件通常被放置在 $PROJECT/jni/Application.mk下，$PROJECT指的是您的项目。不过Application.mk并不是必须的。
+
+我之前按照google官方文档中的方法，利用还在试验阶段的gradle，通过Android studio构建过NDK项目，构建过程中并不需要添加上面的两个mk文件。可见Android gradle插件肯定对其做了处理。既然我们要利用NDK命令来编译jni，那么就有必要把Android gradle中的NDK部分屏蔽掉。
+
+
+在利用Gradle从零开始构建Android app项目博文中给出的代码的基础上，添加JNI代码。
+
+### 添加JNI代码
+
+在app文件夹中创建jni文件夹，然后在里面添加test.c,Android.mk,Application.mk.
+
+test.c
+```c
+#include<stdio.h>
+#include<jni.h>
+#include <android/log.h>
+#define TAG "myjni"
+#include <assert.h>
+#include <string.h>
+#define LOGV(...) __android_log_print(ANDROID_LOG_VERBOSE, TAG, __VA_ARGS__)
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG , TAG, __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO  , TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN  , TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR  ,TAG, __VA_ARGS__)
+ static JNIEnv* env = NULL;
+jstring native_hello(JNIEnv* env,jobject obj)
+{
+    return (*env)->NewStringUTF(env,"hello from c!!!!!!");
+}
+/*
+ *方法对应表
+ */
+static JNINativeMethod gMethods[]=
+{
+        {"helloFromC","()Ljava/lang/String;",(void*)native_hello},
+};
+/*
+ * 注册本地方法
+ */
+ static int registerNativeMethods(JNIEnv* env,const char* className,JNINativeMethod gMethods[],int numMethods)
+{
+     jclass clazz;
+     clazz = (*env)->FindClass(env,className);
+     if(NULL == clazz)
+     {
+         return JNI_FALSE;
+     }
+     if((*env)->RegisterNatives(env,clazz,gMethods,numMethods))
+     {
+         return JNI_FALSE;
+     }
+     return JNI_TRUE;
+}
+ /*
+  * 注册本地方法
+  */
+  static int unRegisterNativeMethods(JNIEnv* env,const char* className)
+ {
+     jclass clazz;
+     clazz = (*env)->FindClass(env,className);
+     if(NULL == clazz)
+     {
+         return JNI_FALSE;
+     }
+     if((*env)->UnregisterNatives(env,clazz))
+     {
+         return JNI_FALSE;
+     }
+     return JNI_TRUE;
+ }
+ /*
+* APP调用System.loadLibrary()时，会首先执行该函数
+* 如果成功返回JNI版本, 失败返回-1
+  */
+ JNIEXPORT jint JNICALL  JNI_OnLoad(JavaVM* vm, void* reserved)
+ {
+     LOGV("JNI_OnLoad is exec!!!!!!!!!!!");
+         jint result = -1;
+         if ((*vm)->GetEnv(vm, (void**) &env, JNI_VERSION_1_6) != JNI_OK) {
+             return -1;
+         }
+         assert(env != NULL);
+         if (!registerNativeMethods(env,"com/example/mytestapp/MyActivity",gMethods,sizeof(gMethods) / sizeof(gMethods[0])))
+         {//注册
+             return -1;
+         }
+         //成功
+         result = JNI_VERSION_1_6;
+         return result;
+ }
+
+```
+Android.mk
+```
+LOCAL_PATH := $(call my-dir)
+
+include $(CLEAR_VARS)
+LOCAL_LDLIBS +=  -llog
+LOCAL_MODULE    := test
+LOCAL_SRC_FILES := test.c
+
+include $(BUILD_SHARED_LIBRARY)
+```
+
+Application.mk
+```
+APP_ABI := all
+```
+
+### 增加对NDK的支持
+
+先修改local.properties，添加NDK路径
+
+```
+ndk.dir=/usr/local/android-ndk-r10e
+```
+接下来主要是修改app/build.gradle.
+
+我们要怎样让gradle支持对NDK的编译呢？
+
+首先屏蔽掉Android gradle插件对NDK的支持
+
+然后编写编译jni的task，每当要编译java代码时，这个任务就应该被执行，而且要在编译java代码前执行
+
+最后当然要编写clean jni的task了，每当默认的clean执行的时候，这个任务就要执行，没有严格谁先谁后
+
+```groovy
+/*
+    引入编译app的插件
+    参考官方文档android-gradle-plugin-dsl//com.android.build.gradle.AppExtension.html
+    可知有两个参数是必须设置的
+    buildToolsVersion
+    compileSdkVersion
+    都是string 类型
+*/
+
+apply plugin: 'com.android.application'
+
+import org.apache.tools.ant.taskdefs.condition.Os
+/*设置编译Android项目的参数*/
+
+android {
+    println '---------android configure phase --------'
+    buildToolsVersion "22.0.1"
+    compileSdkVersion "android-22"
+
+    sourceSets{
+        main{
+           /*
+                路径为build.gradle为基准的相对路径
+                指定到包名起始路径即可
+                设置java代码路径
+            */
+           java.srcDirs 'src'
+ 
+          /* 设置res资源路径
+            换了一种写法
+            */
+           res {
+               srcDirs 'res'
+           }
+        /*指定manifest路径*/
+          manifest.srcFile 'AndroidManifest.xml'
+        
+        /*移除对NDK的支持*/
+        jni.srcDirs = [] //将其设为空就可以了。
+        jniLibs.srcDir 'libs' //设定so库路径
+        }
+
+    }
+/*
+    定义编译任务
+    type:Exec 可以理解为这个task继承自Exec类型的task
+*/
+
+task ndkBuild(type:Exec){
+    workingDir file('./') //指明jni文件夹在哪里
+    commandLine getNdkBuildCmd()
+}
+/*
+    在tasks任务集合中，找到javaComile类型的即编译java代码的任务，
+    对其添加依赖，先执行编译jni的任务
+*/
+
+tasks.withType(JavaCompile){
+compileTask -> compileTask.dependsOn ndkBuild
+}
+
+/*添加clean*/
+
+task cleanJni(type:Exec){
+    workingDir file('./')
+    commandLine getNdkBuildCmd(), 'clean' 
+}
+/*让默认的clean任务依赖于cleanJni*/
+clean.dependsOn cleanJni
+
+}
+/*获取NDK路径*/
+
+def getNdkPath (){
+    Properties properties = new Properties()
+    properties.load(project.rootProject.file('local.properties').newDataInputStream())
+    def ndkdir = properties.getProperty('ndk.dir', null)
+    if (ndkdir == null)
+        throw new GradleException('NDK location not found. Define location with ndk.dir in the local.properties file.')
+    
+    return ndkdir
+}
+
+def getNdkBuildCmd (){
+    
+    def ndkbuild = getNdkPath() + "/ndk-build"
+
+    return ndkbuild
+}
+```
+
+### 修改java代码
+
+首先修改布局文件，为textview添加id为tv
+
+然后修改MyActivity.java
+
+```java
+package com.example.mytestapp;
+
+import android.app.Activity;
+import android.os.Bundle;
+import android.widget.TextView;
+
+public class MyActivity extends Activity
+{
+    private native String helloFromC();
+    private TextView mytv;
+    /** Called when the activity is first created. */
+    @Override
+    public void onCreate(Bundle savedInstanceState)
+    {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.main);
+        TextView mytv = (TextView)findViewById(R.id.tv);
+        mytv.setText(helloFromC());
+    }
+    static {
+            System.loadLibrary("test");
+    }
+}
+```
+
+### 编译和安装
+
+执行
+
+```
+./gradlew build
+```
+
+安装
+```
+./gradlew installDebug
+```
+ 然后允许apk,结果如下
+
+![运行结果][1]
+
+大功告成！！！！
+
+[源码下载][2] 右键另存为。
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/Gradle-jni-1.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/MyTestApp-jni.zip

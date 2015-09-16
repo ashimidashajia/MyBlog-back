@@ -1,4 +1,5 @@
-yout: post
+---
+layout: post
 title: Gradle中的对象与工作流程
 categories: 项目管理
 tags: [Gradle,构建]
@@ -47,7 +48,17 @@ gradleUserHomeDir: /home/shajia/.gradle
 gradleVersion: 2.6
 
 ```
+### Gradle中的三个对象
 
+Gradle构建过程中有三个对象，Gradle对象，settings对象，project对象。
+
+前面提到了，在执行gradle XXX命令的时候，就会创建一个全局唯一额gradle对象。
+
+settings对象，其实可以理解为对应的是settings.gradle脚本，通常也之有一个。
+
+project对象，可以理解为有多少个build.gradle脚本，就有多少个project对象。
+
+这个三个对象相关的属性和操作方法请参考官方文档。
 
 ### Gradle构建的三个阶段
 
@@ -138,6 +149,30 @@ task hello << {
 ```
 该方式创建的任务会在执行阶段被执行,task中有一个action list，task运行时会顺序执行action list中的action，doLast或者doFirst后面跟的闭包就是一个action，doLast是把action插入到list的最后面，而doFirst是把action插入到list的最前面。
 
+### task任务的配置
+
+这里介绍两种方法。
+
+#### 方法1：
+```groovy
+task hello {
+    name = 'shajia'//我将该区域理解为配置区域，这里的代码都在配置阶段执行，初始化一些变量等
+    doLast{
+    println name  //在执行阶段执行
+    }
+}
+```
+#### 方法2：
+```groovy
+
+task hello <<{
+    println name;
+}
+
+hello.configure{
+    name = 'shajia'
+}
+```
 
 ### tasks任务的依赖
 
@@ -160,22 +195,37 @@ XXXX[UP-TO_DATE]
 ```
 就表示不需要重新编译。
 
-更改test根目录下的build.gradle:
+这里同样介绍两种设置依赖的方法。
 
-```
-println 'gradleHomeDir: '+ gradle.gradleHomeDir
-println 'gradleUserHomeDir: '+gradle.gradleUserHomeDir
-println 'gradleVersion: '+ gradle.gradleVersion
-
-task hello{
-    println '-------configure phase--------'
+#### 方法1：
+```groovy
+task A << {
+    println ' I am from A'
 }
 
+task B <<{
+    println 'I am from B'
+}
 
-task hello <<{
-    println '-----exec phase----------'
+A.dependsOn B
+```
+你执行 gradle task A的时候就会先执行task B 在执行task A.
+
+#### 方法2：
+```groovy
+task A  {
+    dependsOn B
+    doLast{
+    println 'I am from A'
+    }
+}
+
+task B <<{
+    println 'I am from B'
 }
 ```
+这里是把依赖关系方到了配置区域里了。
+
 
 
 [1]: http://7xj6ce.com1.z0.glb.clouddn.com/gradle-porject-1.png
