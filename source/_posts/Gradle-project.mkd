@@ -1,0 +1,185 @@
+yout: post
+title: Gradle中的对象与工作流程
+categories: 项目管理
+tags: [Gradle,构建]
+
+---
+
+### 简述
+
+引用官方文档中的原话：
+
+First, Gradle scripts are configuration scripts. As the script executes, it configures an object of a particular type. For example, as a build script executes, it configures an object of type Project. This object is called the delegate object of the script. The following table shows the delegate for each type of Gradle script. 
+
+大意就是说Gradle中的脚本最终都会转换为某个特定类型的对象。如下图所示：
+
+![Gradle 对象][1]
+
+<!--more-->
+你可以在脚本中直接使用这些对象中定义的属性和方法。实际上就是把当前脚本的上下文指定给了某一对象嘛。
+
+Second, each Gradle script implements the Script interface. This interface defines a number of properties and methods which you can use in the script. 
+
+大意是说所有的Gradle脚本都实现了Script接口，文档dsl/org.gradle.api.Script.html，可以看到如下图所示:
+
+![script doc][2]
+
+看到了吧，这就是为什么每种脚本里面都可以使用apply方法的原因了，只要是Script中定义的属性和方法，所有的脚本中都可以使用。
+
+其中build.gradle对应project对象，settings.gradle对应settings对象，init.gradle对应Gradle对象，不过init.gradle用的不太多吧（个人意见），但是当我们执行gradle xxx命令的时候，就会产生一个全局唯一的gradle对象。可以通过帮助文档，查看他有什么属性和方法。如下图所示是其部分属性：
+
+![gradle doc][3],
+
+这三个属性可以获取gradle可执行程序的路径；gradle可执行程序在当前用户家目录下存储的配置文件，编译过程的缓存文件，插件等，以及gradle版本。
+
+创建一个test文件夹，在里面创建一个build.gradle 内容如下
+
+```groovy
+println 'gradleHomeDir: '+ gradle.gradleHomeDir
+println 'gradleUserHomeDir: '+gradle.gradleUserHomeDir
+println 'gradleVersion: '+ gradle.gradleVersion
+```
+执行 gradle  tasks，结果如下：
+
+```
+gradleHomeDir: /home/shajia/tools/gradle-2.6
+gradleUserHomeDir: /home/shajia/.gradle
+gradleVersion: 2.6
+
+```
+
+
+### Gradle构建的三个阶段
+
+Gradle整个构建过程包含三个阶段，分别是初始化阶段，配置阶段以及执行阶段。
+
+#### <font color="#ff5588">初始化阶段:</font>
+
+Gradle支持单个项目和多个项目同时编译。在初始化阶段，就是要决定本次构建包含哪些子项目，并且为这些被包含的子项目创建project对象。
+
+settings.gradle中指明了当前构建包含哪些子项目，如果是单一项目的，可以没有该脚本，但是如果构建多个项目，那么必须有该脚本，内容形式如下：
+
+```
+include ':app1',':app2'
+```
+说明本次构建包含了当前路径下app1和app2文件夹下的项目。而且settings对象也被创建，可以使用它里面的属性和方法。
+
+#### <font color="#ff5588">配置阶段:</font>
+
+本阶段中会利用子项目文件夹下的build.gradle脚本配置在初始化阶段创建的project对象。一个project对象由多个任务组成，此阶段也会去创建、配置task及相关信息。本阶段结束后，各个task任务之间的依赖关系也都明确了。每个project对象都有一个tasks对象，表示这个project的tasks集合。
+
+
+
+#### <font color="#ff5588">执行阶段:</font>
+
+运行阶段，根据gradle命令传递过来的task名称，执行相关依赖任务子集，即相关依赖的任务都要执行。
+
+在当前文件夹下创建两个文件夹 app1 app2.在创建settings.gradle脚本，内容如下：
+
+```groovy
+println '--------init phase-----'
+include ':app1',':app2'
+```
+
+分别在 app1和app2文件夹下创建build.gradle 脚本，内容如下：
+
+```
+println '--app1-----configuer phase-----’
+
+
+```
+```
+println '--app2-----configuer phase-----‘
+
+```
+执行 gradle tasks 结果如下
+
+```
+--------init phase-----
+gradleHomeDir: /home/genglei-cuan/tools/gradle-2.6
+gradleUserHomeDir: /home/genglei-cuan/.gradle
+gradleVersion: 2.6
+--app1-----configuer phase-----
+--app2-----configuer phase-----
+
+```
+这个例子可以看到初始化阶段和配置阶段打印的信息。没有创建任务，所以执行阶段没有执行任何东西。
+
+
+
+### task任务的创建
+
+任务的创建总体上说有两种方法：
+
+#### 方法1：
+
+```groovy
+
+task hello{
+    println 'hello'
+}
+```
+该方式创建的任务会在配置阶段执行。
+#### 方法2：
+
+```groovy
+task hello{
+
+    doLast{
+    println 'hello'
+    }
+}
+```
+可以简写为
+```
+task hello << {
+    println 'hello'
+}
+```
+该方式创建的任务会在执行阶段被执行,task中有一个action list，task运行时会顺序执行action list中的action，doLast或者doFirst后面跟的闭包就是一个action，doLast是把action插入到list的最后面，而doFirst是把action插入到list的最前面。
+
+
+### tasks任务的依赖
+
+Gradle中有一些默认的任务:
+
+assemble:该任务包含了项目中的所有打包相关的任务，比如java项目中打的jar包，Android项目中打的apk.
+
+check: 该任务包含了项目中所有验证相关的任务，比如运行测试的任务,代码规范检查等
+
+build: 该任务包含了assemble和check
+
+clean: 该任务会清空项目的所有的输出，删除所有在assemble任务中打的包
+
+要特别注意，gradle自带的这些任务，几乎都每实现，而都要依赖于插件。说白了就是为插件提供了Hook钩子，统一了接口。真正的事情，都是有插件完成的，插件就是一堆tasks的集合。只要包含了某个插件，就会包含很多任务了。比如包含了Android 插件，那么就会包含很与Android开发相关的任务了。
+
+Gradle会自动检查一个任务的输入和输出。比如连续两次运行build任务的，Gradle会报告所有的任务都已经是最新刚运行过的了，不需要再次运行。这样的话，任务之间就算是有相互依赖，也不会导致重复的执行。比如说你可能经常看到下面的结果：
+
+```
+XXXX[UP-TO_DATE]
+```
+就表示不需要重新编译。
+
+更改test根目录下的build.gradle:
+
+```
+println 'gradleHomeDir: '+ gradle.gradleHomeDir
+println 'gradleUserHomeDir: '+gradle.gradleUserHomeDir
+println 'gradleVersion: '+ gradle.gradleVersion
+
+task hello{
+    println '-------configure phase--------'
+}
+
+
+task hello <<{
+    println '-----exec phase----------'
+}
+```
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/gradle-porject-1.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/Gradle-project-2.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/Gradle-project-3.png
+
+
