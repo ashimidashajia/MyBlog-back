@@ -1,0 +1,79 @@
+﻿
+---
+layout: post
+title: ubuntu14.04 安装HAXM(KVM)提升android虚拟机Android x86运行速度
+categories: Android底层开发
+tags: [提高效率]
+
+---
+
+前面的例子中，我们使用了模拟器来，今天介绍一种让你模拟器快如飞的办法。其实从Android 5.0开始都谷歌已经开始提供X86的模拟器镜像了，速度已经很快。
+
+1.先检查cpu是否支持ardware virtualization,返回0表示不支持
+```
+    egrep -c '(vmx|svm)' /proc/cpuinfo
+```
+
+<!--more-->
+2.检查是否支持upports kvm,需要安装工具pu-checker
+```
+sudo apt-get install cpu-checker
+```
+3.执行检测命令
+```
+kvm-ok
+```
+返回
+
+cpu支持
+```
+"INFO: Your CPU supports KVM extensions
+INFO: /dev/kvm exists
+KVM acceleration can be used"
+```
+
+cpu不支持
+```
+需要到bios中设置VT开启状态
+"INFO: KVM is disabled by your BIOS
+HINT: Enter your BIOS setup and enable Virtualization Technology (VT),
+and then hard poweroff/poweron your system
+KVM acceleration can NOT be used"
+```
+开始安装kvm
+```
+sudo apt-get install qemu-kvm libvirt-bin ubuntu-vm-builder bridge-utils
+```
+安装成功之后重启.
+
+添加用户到kvm,libvirtd组
+```
+sudo adduser your_user_name kvm
+sudo adduser your_user_name libvirtd
+```
+安装验证:
+```
+sudo virsh -c qemu:///system list
+```
+安装成功出现如下命令
+```
+Id Name                 State
+```
+
+通过命令启动虚拟机
+
+```
+<SDK directory>/tools/emulator-x86 -avd Your_AVD_Name -qemu -m 2047 -enable-kvm
+```
+通过avd manager启动
+```
+Run > Run Configurations>Target>Additional Emulator Command Line Options
+```
+添加启动参数
+```
+-qemu -m 2047 -enable-kvm
+```
+
+
+
+
