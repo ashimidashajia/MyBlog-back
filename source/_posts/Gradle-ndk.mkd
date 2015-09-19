@@ -1,6 +1,6 @@
 ---
 layout: post
-title: 让Gradleg构建支持NDK
+title: 让Gradle构建支持NDK
 categories: 项目管理
 tags: [Gradle,构建]
 
