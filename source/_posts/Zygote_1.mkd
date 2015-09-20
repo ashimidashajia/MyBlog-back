@@ -1,0 +1,317 @@
+---
+layout: post
+title: Android 5.1 Lollipop的Zygote分析——上篇
+categories: Android底层开发
+tags: [Android核心服务]
+
+---
+
+### 整体介绍
+
+因为公司最近的项目，频繁的使用了xposed框架。作为一种Hook技术，xposed框架主要是对Android系统中的app_process程序做了手脚。为了弄清楚xposed框架背后的原理,那么肯定要分析app_process它的原理喽。
+
+app_process是在程序执行期间将其名字修改为zygote的。zygote是受精卵的意思，主要作用就是进行细胞分裂嘛，是Android系统执行APK程序的核心服务。zygote进程首先加载启动ART虚拟机，然后在加载一些系统核心类和资源，这些都是其他APK程序都可能要用到的资源。最后zygote进程进入监听状态。一旦Android上层有创建新APK进程的需求，zygote进程便会为其分裂出新的进程。这个APK新进程，一开始便拥有了ART虚拟机和zygote预先加载的各种系统类和资源，能大大加速apk应用的启动，同时也能节省很大的内存开支。
+
+这里解释一下，为什么zygote进程要预先加载系统资源。zygote进程实际上是利用fork分裂出新的进程的，linux内核采用了写时复制技术：内核只为新生成的子进程创建虚拟空间结构，它们来自于父进程的虚拟地址结构，但是不为子进程的虚拟地址分配物理内存，它们共享父进程的物理空间，当父子进程中有更改相应段的行为发生时，再为子进程相应的段分配物理空间。
+
+通常来说，在利用fork创建出的子进程中会调用exec系统调用，去执行新的其他程序。在fork之后exec之前两个进程用的是相同的物理空间（内存区），子进程的代码段、数据段、堆栈都是指向父进程的物理空间，也就是说，两者的虚拟空间不同，但其对应的物理空间是同一个。当父子进程中有更改相应段的行为发生时，再为子进程相应的段分配物理空间，如果不是因为exec，内核会给子进程的数据段、堆栈段分配相应的物理空间（至此两者有各自的进程空间，互不影响），而代码段继续共享父进程的物理空间（两者的代码完全相同）。而如果是因为exec，由于两者执行的代码不同，子进程的代码段也会分配单独的物理空间。    
+
+因为Android上层APK程序不会去修改zygote进程预先加载的系统类和系统资源，所以就不需要为每个APK进程重新分配这些资源，所有APK程序都共用在zygote预先加载的这些资源，所以性能自然也就提高了。
+
+<!--more-->
+### zygote在init.rc中的配置
+
+
+app_process进程，是在init.rc中通过引入下面的文件被配置的：
+
+```
+import /init.${ro.zygote}.rc
+```
+在Android源码/system/core/rootdir中，有如下图所示的四个与zygote相关的文件
+
+![zygote.rc][1]
+
+可见，究竟是将这个四个文件中的哪一个导入到init.rc中是由ro.zygote这个只读属性决定的。
+
+google在Android 5.0中加入了对64位CPU的支持，这些zygote相关的rc文件就是与32位和64位CPU有关系。如果ro.zygote为zygote32,那么说明只支持32位程序；如果是zygote64,那么只支持64位程序；如果是zygote32_64,说明支持32位程序为主，兼容64位程序；如果是zygote64_32说明支持64位程序为主，兼容32位程序。
+
+下面是zygote64_32.rc中的内容：
+
+```
+service zygote /system/bin/app_process64 -Xzygote /system/bin --zygote --start-system-server --socket-name=zygote
+    class main
+    socket zygote stream 660 root system
+    onrestart write /sys/android_power/request_state wake
+    onrestart write /sys/power/state on
+    onrestart restart media
+    onrestart restart netd
+
+service zygote_secondary /system/bin/app_process32 -Xzygote /system/bin --zygote --socket-name=zygote_secondary
+    class main
+    socket zygote_secondary stream 660 root system
+    onrestart restart zygote
+```
+
+其中app_process64 和app_process32 就是zygote进程的可执行程序，启动后会改名成zygote。
+
+顾名思义，zygote_secondary即app_process32是一个运行在32位的进程，它所连接的库也都是32位的。而zygote就是运行在64位的进程，它所连接的库都是64位的。在不考虑有32/64兼容库的情况下，一个进程如果要正确运行，就必须从可执行程序入口开始到所有使用的库都保持32/64位的一致性。因为zygote进程是所有第三方应用程序的父进程，所以可以认为，如果应用程序是32位的，那没他的父进程也肯定是32位，换句话说，如果需要启动某个32位的应用，那么肯定是通过32位的zygote进程fork出来的。
+
+
+### zygote代码分析
+
+app_process相关的代码在:Android源码/frameworks/base/cmds/app_process中。都是c++代码，那么就好办了，找到main函数，也就找到了zygote进程的入口了。
+
+main函数在app_main.cpp中,另外传入的参数为 -Xzygote /system/bin --zygote --socket-name=zygote （或者zygote_second）
+
+```c++
+int main(int argc, char* const argv[])
+{
+............................................................................
+
+    AppRuntime runtime(argv[0], computeArgBlockSize(argc, argv));//AppRuntime继承自AndroidRuntime类
+    // Process command line arguments
+    // ignore argv[0]
+    argc--;
+    argv++;
+
+
+..............................................................................
+   int i;
+    for (i = 0; i < argc; i++) {
+        if (argv[i][0] != '-') {
+            break;
+        }
+        if (argv[i][1] == '-' && argv[i][2] == 0) {
+            ++i; // Skip --.
+            break;
+        }
+        runtime.addOption(strdup(argv[i]));//-------传递的参数是 -Xzygote，结束后i=1
+    }
+
+    // Parse runtime arguments.  Stop at first unrecognized option.
+    bool zygote = false;
+    bool startSystemServer = false;
+    bool application = false;
+    String8 niceName;
+    String8 className;
+
+    ++i;  // Skip unused "parent dir" argument. --------------------i=2
+    while (i < argc) {
+        const char* arg = argv[i++];
+        if (strcmp(arg, "--zygote") == 0) {
+            zygote = true;
+            niceName = ZYGOTE_NICE_NAME;
+        } else if (strcmp(arg, "--start-system-server") == 0) {
+            startSystemServer = true;
+        } else if (strcmp(arg, "--application") == 0) {
+            application = true;
+        } else if (strncmp(arg, "--nice-name=", 12) == 0) {
+            niceName.setTo(arg + 12);
+        } else if (strncmp(arg, "--", 2) != 0) {
+            className.setTo(arg);
+            break;
+        } else {
+            --i;
+            break;
+        }
+    }
+
+.............................................................................
+    if (!niceName.isEmpty()) { //niceNmae为 zygote
+        runtime.setArgv0(niceName.string());
+        set_process_name(niceName.string());
+    }
+
+    if (zygote) {
+        runtime.start("com.android.internal.os.ZygoteInit", args);//---------很关键的函数,在ANdroidRuntime类中实现，args为start-system-server
+    } else if (className) {
+        runtime.start("com.android.internal.os.RuntimeInit", args);
+    } else {
+        fprintf(stderr, "Error: no class name or --zygote supplied.\n");
+        app_usage();
+        LOG_ALWAYS_FATAL("app_process: no class name or --zygote supplied.");
+        return 10;
+    }
+}
+
+```
+
+main函数流程还是比较清晰的，创建AppRuntime的对象runtime,然后就是解析参数，决定下一步要做什么。
+
+传递的参数包含了--zygote参数和--start-system-server参数，zygote和startSystemServer都为true，所以main函数最后执行的是
+
+```c++
+runtime.start("com.android.internal.os.ZygoteInit", args)// args为start-system-server
+```
+####  AppRuntime的start函数
+
+AppRuntime类继承于AndroidRuntime类，自身没有实现start函数，所以main()函数中调用的runtime.start()肯定调用的是其父类是AndroidRuntime的start()函数。
+
+AndroidRuntime对应的代码位于frameworks/base/core/jni/AndroidRuntime.cpp，
+
+```c++
+void AndroidRuntime::start(const char* className, const Vector<String8>& options)
+{
+    ALOGD(">>>>>> START %s uid %d <<<<<<\n",
+            className != NULL ? className : "(unknown)", getuid());
+.............................................................................................
+    static const String8 startSystemServer("start-system-server");
+
+    /*
+     * 'startSystemServer == true' means runtime is obsolete and not run from
+     * init.rc anymore, so we print out the boot start event here.
+     */
+    for (size_t i = 0; i < options.size(); ++i) {
+        if (options[i] == startSystemServer) {
+           /* track our progress through the boot sequence */
+           const int LOG_BOOT_PROGRESS_START = 3000;
+           LOG_EVENT_LONG(LOG_BOOT_PROGRESS_START,  ns2ms(systemTime(SYSTEM_TIME_MONOTONIC)));
+        }
+    }
+
+    const char* rootDir = getenv("ANDROID_ROOT");//-------------如果没有设置ANDROID_ROOT环境变量，就将其设置为/system
+    if (rootDir == NULL) {
+        rootDir = "/system";
+        if (!hasDir("/system")) {
+            LOG_FATAL("No root directory specified, and /android does not exist.");
+            return;
+        }
+        setenv("ANDROID_ROOT", rootDir, 1);
+    }
+
+    //const char* kernelHack = getenv("LD_ASSUME_KERNEL");
+    //ALOGD("Found LD_ASSUME_KERNEL='%s'\n", kernelHack);
+
+    /* start the virtual machine */
+    JniInvocation jni_invocation;//------------------初始化JNI环境，里面做了很重要的工作，加载对应的虚拟机so库
+    jni_invocation.Init(NULL);
+    JNIEnv* env;
+    if (startVm(&mJavaVM, &env) != 0) { //------------------启动虚拟机
+        return;
+    }
+    onVmCreated(env);//-----------------该方法是一个虚函数，是由其子类负责实现的
+
+    /*
+     * Register android functions.
+     */
+    if (startReg(env) < 0) {----------------------为Android核心类在虚拟机中为其注册所需的的JNI函数
+        ALOGE("Unable to register all android natives\n");
+        return;
+    }
+.................................................................................................................
+    char* slashClassName = toSlashClassName(className);// classname为传递过来的参数com.android.internal.os.ZygoteInit，该函数作用是将其转换为com/android/internal/os/ZygoteInit
+    jclass startClass = env->FindClass(slashClassName);
+    if (startClass == NULL) {
+        ALOGE("JavaVM unable to locate class '%s'\n", slashClassName);
+        /* keep going */
+    } else {
+        jmethodID startMeth = env->GetStaticMethodID(startClass, "main",
+            "([Ljava/lang/String;)V");
+        if (startMeth == NULL) {
+            ALOGE("JavaVM unable to find main() in '%s'\n", className);
+            /* keep going */
+        } else {找className指定的class的main函数，并以options为参数，调用main函数
+            env->CallStaticVoidMethod(startClass, startMeth, strArray);
+
+#if 0
+            if (env->ExceptionCheck())
+                threadExitUncaughtException(env);
+#endif
+        }
+    }
+    free(slashClassName);
+
+    ALOGD("Shutting down VM\n");
+    if (mJavaVM->DetachCurrentThread() != JNI_OK)
+        ALOGW("Warning: unable to detach main thread\n");
+    if (mJavaVM->DestroyJavaVM() != 0)
+        ALOGW("Warning: VM did not shut down cleanly\n");
+}
+
+```
+AndroidRunTime.start函数主要完成了三项工作：
+
+<font color="#ff5588">1.启动虚拟机</font>
+
+首先初始化JNI环境：
+```c++
+JniInvocation jni_invocation;
+jni_invocation.Init(NULL);
+```
+这部分代码实现在Android源码/libnativehelper/JniInvocation.cpp中。这里有一个很重要的步骤，就是加载虚拟机实现so库。Android4.4开始引入了ART虚拟机，但是默认的还是dalvik虚拟机。但是从Andoroid 5.0开始就只有ART虚拟机了。
+
+```c++
+#ifdef HAVE_ANDROID_OS
+static const char* kLibrarySystemProperty = "persist.sys.dalvik.vm.lib.2";
+static const char* kDebuggableSystemProperty = "ro.debuggable";
+static const char* kDebuggableFallback = "0";  // Not debuggable.
+#endif
+static const char* kLibraryFallback = "libart.so";
+
+```
+我们使用的就是Android系统，所以HAVE_ANDROID_OS必然是设置了，persist.sys.dalvik.vm.lib.2"记录了使用的是哪种虚拟机。在Android 5.0以上版本的设备中，执行如下命令：
+```bash
+root@generic_x86_64:/ # getprop persist.sys.dalvik.vm.lib.2
+libart.so
+```
+可知加载的库就是ART虚拟机的实现库libart.so。
+
+接下来是调用AndroidRuntime的startVm方法启动ART虚拟机。
+
+最后是调用AndroidRuntime子类，也就是app_main.cpp中定义的AppRuntime类中的onVmCreated函数。
+
+
+<font color="#ff5588">2.向虚拟机注册需要的Native函数</font>
+
+基本Android的每个模块都有一些native实现需要和Java代码关联起来，前面也说过了事先注册能够提高性能。
+
+调用AndroidRuntime类中的startReg注册JNI函数。
+
+```c++
+/*static*/ int AndroidRuntime::startReg(JNIEnv* env)
+{
+   
+......................................................................................
+    if (register_jni_procs(gRegJNI, NELEM(gRegJNI), env) < 0) {
+        env->PopLocalFrame(NULL);
+        return -1;
+    }
+    env->PopLocalFrame(NULL);
+
+    //createJavaThread("fubar", quickTest, (void*) "hello");
+
+    return 0;
+}
+```
+其中gRegJNI是一个数组
+
+```c++
+static const RegJNIRec gRegJNI[] = {
+    REG_JNI(register_com_android_internal_os_RuntimeInit),
+    REG_JNI(register_android_os_SystemClock),
+    REG_JNI(register_android_util_EventLog),
+    REG_JNI(register_android_util_Log),
+...........................
+}
+```
+宏REG——JNI
+
+```c++
+  #define REG_JNI(name)      { name }
+    struct RegJNIRec {
+        int (*mProc)(JNIEnv*);
+    };
+```
+注册jni函数的动作很简单，只是在遍历array数组，并尝试回调每个数组项的mProc回调函数.注册JNI其实也很好理解，主要写过JNI程序的都知道定义的JNI函数是给某个上层JAVA类调用的嘛，注册的意思就是注册给哪个类了，哪个类才能调用这些JNI函数。
+
+
+
+<font color="#ff5588">3.找className指定的class的main函数，并以options为参数，调用main函数</font>
+
+AppRuntime的start()最后会加载Java层次的ZygoteInit类（com.android.internal.os.ZygoteInit），并利用JNI技术的CallStaticVoidMethod()调用其静态的main()函数，从这一步开始，Android系统从native层进入到了JAVA的世界了。
+
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/zygote-1-1.png
+
+

@@ -6,7 +6,7 @@ categories: Android底层开发
 tags: [提高效率]
 
 ---
-
+ 
 前面的例子中，我们使用了模拟器来，今天介绍一种让你模拟器快如飞的办法。其实从Android 5.0开始都谷歌已经开始提供X86的模拟器镜像了，速度已经很快。
 
 1.先检查cpu是否支持ardware virtualization,返回0表示不支持
