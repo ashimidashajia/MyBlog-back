@@ -1,0 +1,61 @@
+
+---
+layout: post
+title: 持续集成系统搭建之Jenkins篇
+categories: 项目管理
+tags: [代码管理]
+
+---
+
+现在开始搭建Jenkins环境，他的主要作用是每当有代码经过审阅提交到gitlab之后，自动拉取代码，编译运行和测试。
+
+### 安装jenkins
+
+从[Jenkins官网][1]中下载Jenkins最新的deb包。
+
+首先安装一个依赖：
+```
+sudo apt-get install daemon
+```
+<!--more-->
+
+然后
+
+```
+sudo dpkg -i jenkins_1.630_all.deb
+```
+
+
+```bash
+sudo vim /etc/default/jenkins
+```
+将端口由8080改为8002
+```
+HTTP_PORT=8002
+
+```
+重启jenkins
+
+```bash
+sudo  /etc/init.d/jenkins restart
+```
+
+### 添加管理员账号
+
+Jenkins默认安装是没有启用访问控制的,输入ip:端口号便可以名访问（如下图所示）,要启用安全控制,访问Jenkins web界面。
+
+
+![jenkins][2]
+
+现在要做的就是添加一个管理员账号，每次登陆的时候验证通过，才能访问。
+
+首先如下图所示：
+
+![ss][3]
+
+
+
+
+[1]: http://jenkins-ci.org/
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/jenkins-env-1.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/jenkins-env-2.png

@@ -1,0 +1,117 @@
+
+---
+layout: post
+title: 持续集成系统搭建之Jenkins篇
+categories: 项目管理
+tags: [代码管理]
+
+---
+
+现在开始搭建Jenkins环境，他的主要作用是每当有代码经过审阅提交到gitlab之后，自动拉取代码，编译运行和测试。
+
+### 安装jenkins
+
+从[Jenkins官网][1]中下载Jenkins最新的deb包。
+
+首先安装一个依赖：
+```
+sudo apt-get install daemon
+```
+<!--more-->
+
+然后
+
+```
+sudo dpkg -i jenkins_1.630_all.deb
+```
+
+
+```bash
+sudo vim /etc/default/jenkins
+```
+将端口由8080改为8002
+```
+HTTP_PORT=8002
+
+```
+重启jenkins
+
+```bash
+sudo  /etc/init.d/jenkins restart
+```
+
+### 添加管理员账号
+
+Jenkins默认安装是没有启用访问控制的,输入ip:端口号便可以名访问（如下图所示）,要启用安全控制,访问Jenkins web界面。
+
+
+![jenkins][2]
+
+现在要做的就是添加一个管理员账号，每次登陆的时候验证通过，才能访问。
+
+首先如下图所示：
+
+![ss][3]
+
+![aa][5]
+
+接着就可以注册了
+
+![注册][4]
+
+注册成功后,再次进入配置界面
+
+![][6]
+
+取消注册,对匿名用户进行权限相关设置，一般只设置读的权限功能设置.
+
+
+### 插件配置
+
+需要安装gitlab的插件
+
+![][7]
+
+![][8]
+
+可以勾选gitlab的所有插件,至少安装上面所勾选的两个插件.
+
+然后在安装 gradle插件
+
+![gradle][9]
+
+
+### 系统设置
+
+首先配置JDK
+
+![][10]
+
+![jdk][11]
+
+在配置邮箱:
+
+![][12]
+![][13]
+
+[1]: http://jenkins-ci.org/
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/jenkins-env-1.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/jenkins-env-2.png
+[4]: http://7xj6ce.com1.z0.glb.clouddn.com/jenkins-env-3.png
+[5]: http://7xj6ce.com1.z0.glb.clouddn.com/jenkins-env-4.png
+[6]: http://7xj6ce.com1.z0.glb.clouddn.com/jenkins-env-5.png
+[7]: http://7xj6ce.com1.z0.glb.clouddn.com/jenkins-env-6.png
+[8]: http://7xj6ce.com1.z0.glb.clouddn.com/jenkins-env-8.png
+[9]: http://7xj6ce.com1.z0.glb.clouddn.com/jenkins-env-9.png
+[10]: http://7xj6ce.com1.z0.glb.clouddn.com/jenkins-env-10.png
+[11]: http://7xj6ce.com1.z0.glb.clouddn.com/jenkins-env-11.png
+[12]: http://7xj6ce.com1.z0.glb.clouddn.com/jenkins-env-12.png
+[13]: http://7xj6ce.com1.z0.glb.clouddn.com/jenkins-env-13.png
+
+
+
+
+
+
+
+
