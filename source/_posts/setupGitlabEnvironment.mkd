@@ -1,0 +1,172 @@
+---
+layout: post
+title: 持续集成系统搭建之Gitlab篇
+categories: 项目管理
+tags: [代码管理]
+
+---
+
+公司领导让我搭建一个集代码管理，代码评审，自动化编译测试功能与一身的持续集成系统。现将搭建过程整理了一下，算是做个备份吧。
+
+<!--more-->
+
+首先搭建的是代码管理系统，这里使用的gitlab.功能十分强大，完全可以搭建一个私有的github。搭建在公司自己的服务器上，自由控制。
+
+[gitlab官网][1]中有详细的步骤。
+
+### 安装所需的组件
+
+执行下面的命令：
+```
+sudo apt-get install curl openssh-server ca-certificates postfix
+```
+
+其中postfix配置界面，选择如下所示：
+
+![postfix配置][2]
+
+下一步,设置发送邮件的发送者名字。
+
+![mail name][3]
+
+### 安装gitlab
+
+国内不翻墙的话，是无法从官网下载安装包的。我已经下载了最新版本，并且上传到了百度云：
+
+[gitlab安装包][4]
+
+下载后，执行如下命令，安装gilab
+
+```
+sudo dpkg -i gitlab-ce_7.14.3-ce.0_amd64
+```
+
+### 配置Gitlab
+
+主要是配置gitlab的中仓库存储的位置和配置邮件通知功能。
+
+gitlab的配置文件是/etc/gitlab/gitlab.rb
+
+```
+sudo vim /etc/gitlab/gitlab.rb
+```
+找到git_data_dir，默认是被注释掉的，而且默认存储目录是/var/opt/gitlab/git-data,可以根据自己的实际情况修改为其他目录。
+
+```
+#git_data_dir "/var/opt/gitlab/git-data"
+git_data_dir "XXXXXX"
+
+```
+
+重头戏是配置gitlab支持邮件通知功能，这样每当注册成员，或者将成员添加到某个项目等等操作的时候，相关人员都会收到邮件通知。
+
+腾讯企业邮箱配置：
+```
+
+############################
+# gitlab.yml configuration #
+############################
+
+# gitlab_rails['gitlab_ssh_host'] = 'ssh.host_example.com'
+gitlab_rails['time_zone'] = 'Asia/Shanghai'
+gitlab_rails['gitlab_email_enabled'] = true
+gitlab_rails['gitlab_email_from'] = 'gitlab服务器发送邮件的邮箱'
+#发送邮件时，显示的邮件发送者名称
+gitlab_rails['gitlab_email_display_name'] = 'CI-gitlab'
+gitlab_rails['gitlab_email_reply_to'] = 'gitlab服务器发送邮件的邮箱'
+
+
+
+################################
+# GitLab email server settings #
+################################
+# see https://gitlab.com/gitlab-org/omnibus-gitlab/blob/629def0a7a26e7c2326566f0758d4a27857b52a3/doc/settings/smtp.md#smtp-settings
+# Use smtp instead of sendmail/postfix.
+
+gitlab_rails['smtp_enable'] = true
+gitlab_rails['smtp_address'] = "smtp.exmail.qq.com"
+gitlab_rails['smtp_port'] = 465
+gitlab_rails['smtp_user_name'] = "gitlab服务器发送邮件的邮箱"
+gitlab_rails['smtp_password'] = "邮箱的密码"
+gitlab_rails['smtp_domain'] = "邮箱所在的域"
+gitlab_rails['smtp_authentication'] = "login"
+gitlab_rails['smtp_enable_starttls_auto'] = true
+gitlab_rails['smtp_tls'] = true
+
+```
+例如邮箱admin@owent.net，配置如下
+
+```
+# mail config
+gitlab_rails['smtp_enable'] = true
+gitlab_rails['smtp_address'] = "smtp.exmail.qq.com"
+gitlab_rails['smtp_port'] = 465
+gitlab_rails['smtp_user_name'] = "admin@owent.net"
+gitlab_rails['smtp_password'] = "admin@owent.net的密码"
+gitlab_rails['smtp_domain'] = "owent.net"
+gitlab_rails['smtp_authentication'] = "login"
+gitlab_rails['smtp_enable_starttls_auto'] = true
+gitlab_rails['smtp_tls'] = true
+ 
+# If your SMTP server does not like the default 'From: gitlab@localhost' you
+# # can change the 'From' with this setting.
+gitlab_rails['gitlab_email_from'] = 'admin@owent.net'
+```
+
+
+配置访问地址
+
+```
+external_url 'http://XXXX'
+```
+
+然后在/etc/hosts
+
+```
+127.0.0.1       XXXX
+```
+
+### 生效配置和启动gitlab
+
+```
+sudo /etc/init.d/networking restart
+sudo /etc/init.d/postfix restart
+sudo gitlab-ctl reconfigure
+```
+等待一分钟左右：
+
+```
+Running handlers:
+Running handlers complete
+Chef Client finished, 179/199 resources updated in 61.709449475 seconds
+gitlab Reconfigured!
+```
+配置成功。
+
+### 使用
+
+
+在本地浏览器中输入你在/etc/hosts设置的域名，在其他机器上利用服务器IP地址也可访问。
+
+如下图所示:
+
+![gitlab login][5]
+
+默认管理员的账户密码：
+
+```
+Username: root
+Password: 5iveL!fe
+```
+登陆成功后，会提示你为root账号修改密码：
+
+![修改密码][6]
+
+
+
+[1]: https://about.gitlab.com/downloads/#ubuntu1404
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/gitlab-env-1.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/gitlab-env-2.png
+[4]: http://pan.baidu.com/s/1c0djCdi
+[5]: http://7xj6ce.com1.z0.glb.clouddn.com/gitlab-env-3.png
+[6]: http://7xj6ce.com1.z0.glb.clouddn.com/gitlab-env-4.png
