@@ -1,0 +1,197 @@
+
+---
+layout: post
+title: 持续集成系统搭建之Phabricator篇
+categories: 项目管理
+tags: [代码管理]
+
+---
+
+现在开始搭建代码评审环境，Phabricator是FaceBook的一个开源工具，非常流行，支持代码提交前审阅和代码提交后审阅。
+
+### phab安装
+
+Phab依赖的组件较多，有： APache（nginx、lighttpd）、MYSQL、PHP（>5.2）、git、PHP的扩展。一个一个安装的比较麻烦，幸好官方也提供了一键安装脚本。
+<!--more-->
+
+[ubuntu 一键安装脚本][1] 右键另存为。
+
+添加可执行权限，并执行
+
+```
+chmod +x install_ubuntu,sh
+
+sudo ./install_ubuntu.sh
+```
+安装过程中，会弹出一个设置mysql root账户密码的界面:
+
+![mysql root passwd][2]
+
+设置密码，然后继续，一定要记住该密码，后面要用到。
+
+安装过程中会有提示启动失败，不要担心，因为80端口已经被gitlab所占用，后面会在配置。
+
+```base
+Install probably worked mostly correctly. Continue with the 'Configuration Guide':
+
+    https://secure.phabricator.com/book/phabricator/article/configuration_guide/
+
+You can delete any php5-* stuff that's left over in this directory if you want.
+
+```
+说明安装成功。
+
+### 配置apache2
+
+phab的安装其实很简单，主要的时间是花在配置上面。
+
+首先配置端口：
+
+```bash
+sudo vim /etc/apache2/ports.conf
+```
+将80改为8001.
+```
+Listen 8001
+```
+
+然后：
+```bash
+sudo vim /etc/apache2/sites-enabled/000-default.conf
+```
+将端口有80改为8001，还要添加我所添加的内容。
+
+```bash
+<VirtualHost *:8001>
+        # The ServerName directive sets the request scheme, hostname and port that
+        # the server uses to identify itself. This is used when creating
+        # redirection URLs. In the context of virtual hosts, the ServerName
+        # specifies what hostname must appear in the request's Host: header to
+        # match this virtual host. For the default virtual host (this file) this
+        # value is not decisive as it is used as a last resort host regardless.
+        # However, you must set it for any further virtual host explicitly.
+        #ServerName www.example.com
+
+        ServerAdmin webmaster@localhost
+        #DocumentRoot /var/www/html
+
+#==============add by genglei.cuan start===================================
+        #ServerAlias  www.example.com                     #绑定多个域名
+        DocumentRoot /home/godin-ci/phabricator安装目录/webroot
+        RewriteEngine on
+        RewriteRule ^/rsrc/(.*)     -                       [L,QSA]
+        RewriteRule ^/favicon.ico   -                       [L,QSA]
+        RewriteRule ^(.*)$          /index.php?__path__=$1  [B,L,QSA]
+        <Directory "/home/godin-ci/phabricator安装目录/webroot">
+        Require all granted
+        </Directory>
+#=============add by genglei.cuan end======================================
+
+        # Available loglevels: trace8, ..., trace1, debug, info, notice, warn,
+        # error, crit, alert, emerg.
+        # It is also possible to configure the loglevel for particular
+        # modules, e.g.
+        #LogLevel info ssl:warn
+
+        ErrorLog ${APACHE_LOG_DIR}/error.log
+        CustomLog ${APACHE_LOG_DIR}/access.log combined
+
+        # For most configuration files from conf-available/, which are
+        # enabled or disabled at a global level, it is possible to
+        # include a line for only one particular virtual host. For example the
+        # following line enables the CGI configuration for this host only
+        # after it has been globally disabled with "a2disconf".
+        #Include conf-available/serve-cgi-bin.conf
+</VirtualHost>
+
+```
+重启apache2服务
+
+```bash
+sudo /etc/init.d/apache2 restart
+```
+
+结果：
+
+```bash
+* Restarting web server apache2  AH00558: apache2: Could not reliably determine the server's fully qualified domain name, using 10.0.4.251. Set the 'ServerName' directive globally to suppress this message
+                                                                                                                                                                                            [ OK ]
+```
+
+### 配置mysql
+
+此时在浏览器输入服务器ip地址和端口号，如：127.0.0.1:8001，出现如下界面：
+
+![mysql][3]
+
+
+说明无法连接mysql。此时需要进行如下的配置：
+
+```bash
+cd phabricator安装目录 # 切换到安装目录
+phabricator/ $ ./bin/config set mysql.host localhost    #默认为localhost 可不设置
+phabricator/ $ ./bin/config set mysql.port 3306         #默认为 
+phabricator/ $ ./bin/config set mysql.user root         #默认为 root  
+phabricator/ $ ./bin/config set mysql.pass 你为mysql设置的密码
+   
+phabricator/ $ ./bin/storage upgrade
+```
+
+
+### 配置账号和注册
+
+重新在浏览器上访问phab,界面如下：
+
+![phab ][4]
+
+这时我们添加的用户，会默认为系统的管理员，就可以登录到后台进行其他的设置了.
+
+设置完账户之后，会出现下面的界面：
+
+![phab iss][5]
+
+看到了吗，还有16个问题需要解决呢！！！！！
+
+
+点击那个提示16个问题的连接，出现如下所示界面：
+
+![][6]
+
+就按照所列的问题，一个一个解决吧，点击连接进去，都会有提示，按照提示做就可以了。
+
+这里只说一些，需要注意的问题：
+
+配置No Authentication Providers Configured的时候，请按照下图所示配置
+
+![][7]
+
+
+### 配置邮箱
+
+安装sendmail
+
+```
+sudo apt-get install sendmail
+```
+
+然后在配置中把 mailer-adpter 修改成 PhabricatorMailImplementationPHPMailerLiteAdapter。
+
+```
+ ./bin/config set  phpmailer.mailer smtp
+./bin/config set  phpmailer.smtp-host smtp.exmail.qq.com
+./bin/config set  phpmailer.smtp-port 465
+./bin/config set  phpmailer.smtp-user 你的邮箱
+./bin/config set  phpmailer.smtp-password 邮箱密码
+./bin/phd resart
+
+```
+
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/install_ubuntu.sh
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/phab-env-1.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/phab-env-2.png
+[4]: http://7xj6ce.com1.z0.glb.clouddn.com/phab-env-3.png
+[5]: http://7xj6ce.com1.z0.glb.clouddn.com/phab-env-4.png
+[6]: http://7xj6ce.com1.z0.glb.clouddn.com/phab-env-5.png
+[7]: http://7xj6ce.com1.z0.glb.clouddn.com/phab-env-6.png
