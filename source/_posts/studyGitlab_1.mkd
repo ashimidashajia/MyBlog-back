@@ -1,0 +1,154 @@
+---
+layout: post
+title: 持续集成系统学习之Gitlab篇
+categories: 项目管理
+tags: [代码管理]
+
+---
+
+前面我们搭建了持续集成系统,那么现在就开始看看如何使用他们.首先看看Gitlab如何使用吧.另外今天刚刚从CSDN上看到消息,Gitlab所属的公司A轮成功融资400万美元,同时也宣布gitlab 8.0这两天就会发布.真是令人振奋的消息.
+
+<!--more-->
+
+GitLab是一个利用Ruby on Rails开发的开源应用程序，实现一个自托管的Git项目仓库，可通过Web界面进行访问公开的或者私人项目。
+
+它拥有与Github类似的功能，能够浏览源代码，管理缺陷和注释。可以管理团队对仓库的访问，它非常易于浏览提交过的版本并提供一个文件历史库。团队成员可以利用内置的简单聊天程序(Wall)进行交流。它还提供一个代码片段收集功能可以轻松实现代码复用，便于日后有需要的时候进行查找.
+
+### 添加项目
+
+#### 创建项目
+
+登陆账号后,可以按照下图所示创建项目:
+
+![创建项目][1]
+
+#### 填写项目信息
+
+在创建工程的页面，按照要求填写项目的名称和可见性等信息。
+
+![][2]
+
+
+Project path：项目的路径，一般可以认为是项目的名称
+
+Import prject from：如果导入项目的话,支持从Github/Bitbucket等导入
+
+Description（项目的描述）：对项目的简单描述
+
+Visibility Level（项目可见级别）：提供Private（私有的，只有你自己或者组内的成员能访问）/Internal（所有登录的用户）/Public(公开的，所有人都可以访问)三种选项。
+
+
+### 添加和配置SSH公钥
+
+SSH（Secure Shell）是一种安全协议，在你的电脑与GitLab服务器进行通信时，我们使用SSH密钥（SSH Keys）认证的方式来保证通信安全.
+
+1.如果还没有 ~/.ssh 目录，可以手工创建一个(mkdir ~/.ssh)，之后再通过cd ~/.ssh进入SSH目录
+
+2.可以通过ls -l命令查看SSH目录下的文件，来确认你是否已经生成过SSH密钥；如果SSH目录为空，我们开始第二步，生成 SSH 密钥；如果存在id_rsa.pub这个文件，说明你之前生成过SSH密钥，后面有介绍如何添加多个sshkey.
+
+3.执行下面的命令,生成新的SSH密钥,注意修改自己的邮箱,生成过程中,会提示Enter passphrase输入密码,直接enter即可,不设置密码.
+
+```bash
+ssh-keygen -t rsa -C "your email"
+```
+
+4.上述命令执行成功后,会生成一个私钥id_rsa和公钥id_rsa.pub.利用下面的命令查看公钥
+
+```
+cat ~/.ssh/id_rsa.pub
+```
+
+5.按照下图所示
+
+![][3]
+
+![][4]
+
+然后将自己的公钥添加进来
+
+![][5]
+
+6.测试SSH连接
+
+执行下面的命令
+
+```bash
+ssh -T git@你搭建的gitlab服务器域名或者ip
+```
+如果出现下面的信息,则说明成功
+
+```bash
+Welcome to XXXX, XXXX
+```
+
+### 同时使用多个SSH公钥
+
+如果想在多个服务器之间使用不同的SSH公钥,需要做以下配置.
+
+1.生成SSH公钥
+
+```bash
+ssh-keygen -t rsa -C "your email" -f ~/.ssh/gitlab
+```
+-f后面的参数是自定义的SSH Key的存放路径，将来生成的公秘钥的名字分别是gitlab.pub和gitlab.
+
+2.配置自定义的公秘钥名称
+
+在SSH用户配置文件~/.ssh/config中指定对应服务所使用的公秘钥名称，如果没有config文件的话就新建一个(vim ~/.ssh/config)，并输入以下内容(可以添加多个)：
+
+
+```bash
+Host 搭建gitlab服务服务器ip或者域名
+  IdentityFile ~/.ssh/gitlab
+```
+
+### 提交代码
+
+当创建完项目的时候,会出现如下所示:
+
+![][6]
+
+按照要求做就可以了,既可以将本地项目导入gitlab仓库,也可以将gitlab仓库克隆到本地
+
+### 添加成员
+
+按照如下图所示:
+
+![][7]
+
+可以给项目添加成员.
+
+Gitlab成员权限,如下所示
+
+![][8]
+
+Owner是权限最该,一般项目创建者拥有该权限.
+
+Master 权限也很高,可以向保护的分支推送,可以添加其他成员
+
+developer 是不能向保护分支推送
+
+Reporter 只能拉取代码,不能提交推送代码
+
+至于其他详细的权限,自己阅读帮助文档吧.
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/study-gitlab-1.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/study-gitlab-2.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/study-gitlab-3.png
+[4]: http://7xj6ce.com1.z0.glb.clouddn.com/study-gitlab-4.png
+[5]: http://7xj6ce.com1.z0.glb.clouddn.com/study-gitlab-5.png
+[6]: http://7xj6ce.com1.z0.glb.clouddn.com/study-gitlab-6.png
+[7]: http://7xj6ce.com1.z0.glb.clouddn.com/study-gitlab-6.png
+[8]: http://7xj6ce.com1.z0.glb.clouddn.com/study-gitlab-7.png
+
+
+
+
+
+
+
+
+
+
+
+
