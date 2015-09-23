@@ -1,0 +1,198 @@
+---
+layout: post
+title: Android 5.1 init进程分析上篇
+categories: Android底层开发
+tags: [Android核心服务]
+
+---
+
+### 前言
+
+Android系统是运行在linux内核之上的,熟悉linux的人应该都知道内核启动后,第一个进程是init进程.Android系统当然也不例外.只不过相对于原生linux init进程,Android 的init进程有其自己的特点和规则.
+
+Android init进程会初始化Android的属性系统,这个后续会单独介绍,因为属性系统很重要.init进程主要是加载和解析.rc文件,来启动Android系统的服务.
+
+<!--more-->
+
+![Android boot][1]
+
+![Android_boot2][2]
+
+init进程会启动很多守护进程,这些守护进程都是c/c++实现的,后续文章都会对这些守护进程一一介绍.zygote进程前面已经介绍过了.
+
+
+### .rc文件
+
+.rc脚本使用的是一种初始化语言，其中包含了4类声明：
+
+1）Action
+
+2）Command
+
+3）Service
+
+4）Option
+
+该语言规定，Action和Service是以一种“段”（Section）的形式出现的，其中每个Action 段可以含有若干Command，而每个Service段可以含有若干Option。段只有起始标记，却没有明确的结束标记，也就是说，是用“后一个段”的起始来结束“前一个段”的。 
+
+<font color="#ff5588">通俗的说Action段里面的内容,都是各种命令;Service段中包含一个可执行程序,以及对这个可执行程序所做的一些配置</font>
+
+
+#### rc文件的位置
+
+分两种情况介绍:
+
+1.源码中的位置.
+
+rc文件在源码中的位置有两个地方:
+
+```bash
+Android源码/system/core/rootdir
+```
+
+里面内容如下所示,主要是Android系统公共的rc配置.
+
+![rootdir][3]
+
+
+```bash
+Android源码/device/手机厂商/某个具体机型
+```
+这里面的rc,如下所示,主要是设备所特有的配置.
+
+![device][4]
+
+上图所示是摩托 nexus 6,其中shamu是N6手机的研发代号.
+
+2.ROM包中的位置
+
+所有的.rc文件都是ramdisk.img的一部分,而ramdisk.img又是boot.img的一部分.通过名字可以看出来ramdisk是一个基于内存的文件系统,所以不要通过adb shell等方式修改手机中的.rc文件,那样手机重启之后又会从boot分区中加载原来的ramdisk到内存中去.
+
+ramdisk其实挂在到了手机的/目录,所以.rc文件都是在手机/目录下的.
+
+![][7]
+
+上图所示是ramdisk解压之后的文件夹中的内容.
+
+#### rc文件语法
+
+<font color="#ff5588">Action段:</font>
+
+```bash
+on  <trigger>
+ <command1>
+ <command2>
+    ......
+```
+Action可以理解为一个任务,这个任务包含若干条命令,而且只有当满足某个条件的时候,才会触发这个任务.上面所示的trigger即是触发条件.
+
+| trigger                  | 描述  |
+| --------                 | :----:  |
+| boot                     |  init启动阶段    |
+| name=value               |  当属性名对应的值设置为指定值时触发.  |
+| device-added-path        |  当添加设备时触发  |
+| device-removed-path      |  当移除设备时触发  |
+| service-exited-name      |  当指定的服务退出时触发  |
+
+
+其中主要的init启动阶段,如下所示:
+
+![init 几个阶段][5]
+
+可以结合init.rc文件,查看上图中各阶段都执行了哪些命令.
+
+其中还可以手动触发:
+
+```bash
+
+on mytrigger
+    xxxxx
+
+on boot
+    trigger mytrigger
+```
+上面的含义是在boot阶段中,利用trigger命令手动触发了mytrigger.
+
+另外要注意的是,属性触发是很有用的一种触发方式.因为属性值可以在程序中灵活设置,后续讲解属性系统的时候,会结合实例来演示其用法.
+
+
+<font color="#ff5588">Service段:</font>
+
+Service表示一个服务程序，会有init进程启动。因为init.rc中描述的服务往往都是Android核心服务，所以基本上所有的服务会在退出时自动重启。
+
+```bash
+service <name> <pathname> [<arguments>]*
+ <option>
+ <option>
+  ......
+```
+下图所示是来自init.rc中的片段
+
+![][6]
+
+| 选项                             | 描述  |
+| --------                         | :----:  |
+| critical                         |  据设备相关的关键服务，如果在4分钟内，此服务重复启动了4次，那么设备将会重启进入recovery模式。    |
+| disable                          |  服务不会自动运行，必须显式地通过start命令来启动。 |
+| oneshot                          |  当此服务退出时不会自动重启.  |
+| onrestart                        |  当服务重启时执行一条指令  |
+| class name                       |  给服务指定一个类属,这样方便操作多个服务同时启动或停止.默认情况下为default|
+| user username                    |  在执行此服务之前先切换用户名。当前默认为root.  |
+| group groupname                  |  类似于user,切换组名 |
+| setenv name value                |  设置环境变量|
+| socket name type perm user group |  在/dev/socket/下创建一个unix domain的socket，并传递创建的文件描述符fd给服务进程.其中type必须为dgram或stream,seqpacket.用户名和组名默认为0|
+
+
+
+除了Action和Service，.rc中还有一个import,可以导入其他.rc脚本文件的内容.
+```bash
+import /init.environ.rc
+import /init.usb.rc
+import /init.${ro.hardware}.rc
+import /init.${ro.zygote}.rc
+import /init.trace.rc
+```
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/Android_init-1.PNG
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/Android_init-2.PNG
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/Android_init-3.PNG
+[4]: http://7xj6ce.com1.z0.glb.clouddn.com/Android_init-4.PNG
+[5]: http://7xj6ce.com1.z0.glb.clouddn.com/Android_init-5.PNG
+[6]: http://7xj6ce.com1.z0.glb.clouddn.com/Android_init-6.PNG
+[7]: http://7xj6ce.com1.z0.glb.clouddn.com/Android_init-7.PNG
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

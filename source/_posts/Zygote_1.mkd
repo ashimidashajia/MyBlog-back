@@ -5,7 +5,7 @@ categories: Android底层开发
 tags: [Android核心服务]
 
 ---
-
+ 
 ### 整体介绍
 
 因为公司最近的项目，频繁的使用了xposed框架。作为一种Hook技术，xposed框架主要是对Android系统中的app_process程序做了手脚。为了弄清楚xposed框架背后的原理,那么肯定要分析app_process它的原理喽。

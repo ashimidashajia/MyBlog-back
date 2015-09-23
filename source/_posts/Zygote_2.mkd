@@ -5,7 +5,7 @@ categories: Android底层开发
 tags: [Android核心服务]
 
 ---
-  
+   
 上一篇结尾的时候，说过AppRuntime的start()最后会加载Java层次的ZygoteInit类（com.android.internal.os.ZygoteInit），并调用其main函数。
 
 ZygoteInit要做一些和Android平台紧密相关的重要动作，比如创建LocalServerSocket对象、预加载一些类以及资源、启动“Android系统服务”.
