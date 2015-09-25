@@ -3,7 +3,7 @@ layout: post
 title: 让Gradle构建支持NDK
 categories: 项目管理
 tags: [Gradle,构建]
-
+date: 2015-09-18 15:40:13
 ---
  
 原本google公司承诺Android studio 1.3开始支持NDK,但是现在已经到Android studio 1.4 beat 3了，对NDK的支持还是实验性的。那么既然已经对Gradle的有了了解了，那索性就学着添加相关的task让利用$NDK/ndk-build命令编译。

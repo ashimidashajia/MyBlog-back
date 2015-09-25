@@ -3,7 +3,7 @@ layout: post
 title: 构建神器Gradle学习资料
 categories: 项目管理
 tags: [Gradle,构建]
-
+date: 2015-09-15 17:37:32
 ---
 
 谷歌官方推出的Android开发工具Android Studio自带的构建工具是Gradle,号称构建神器。所以很有必要学习如何使用这个神器帮助我们构建大型项目。

@@ -3,7 +3,7 @@ layout: post
 title: linux下批量替换文件内容
 categories: linux基础
 tags: linux常用命令
-
+date: 2015-09-14 16:35:30
 ---
 ---
 ## demo

@@ -3,7 +3,7 @@ layout: post
 title: Android 5.1 Lollipop的Zygote分析——下篇
 categories: Android底层开发
 tags: [Android核心服务]
-
+date: 2015-09-21 23:44:39
 ---
    
 上一篇结尾的时候，说过AppRuntime的start()最后会加载Java层次的ZygoteInit类（com.android.internal.os.ZygoteInit），并调用其main函数。

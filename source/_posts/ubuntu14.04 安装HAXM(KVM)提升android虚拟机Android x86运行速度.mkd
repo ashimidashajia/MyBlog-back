@@ -4,7 +4,7 @@ layout: post
 title: ubuntu14.04 安装HAXM(KVM)提升android虚拟机Android x86运行速度
 categories: Android底层开发
 tags: [提高效率]
-
+date: 2015-09-18 18:47:13
 ---
  
 前面的例子中，我们使用了模拟器来，今天介绍一种让你模拟器快如飞的办法。其实从Android 5.0开始都谷歌已经开始提供X86的模拟器镜像了，速度已经很快。

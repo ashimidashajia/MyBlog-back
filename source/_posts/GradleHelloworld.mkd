@@ -3,7 +3,7 @@ layout: post
 title: 利用Gradle从零开始构建一个Android App工程
 categories: 项目管理
 tags: [Gradle,构建]
-
+date: 2015-09-16 15:38:20
 ---
 
 <font color = "#ff558">原创文章，转载请说明出处</font>

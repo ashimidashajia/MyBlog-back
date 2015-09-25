@@ -1,0 +1,562 @@
+---
+layout: post
+title: Android 5.1 init进程分析中篇
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2015-09-25 15:31:39
+---
+
+### 解析rc文件
+
+init进程相关的源码位置:
+```bash
+Android源码/system/core/init/init.c
+```
+在init进程的main()函数里，会调用init_parse_config_file("/init.rc")一句来解析init.rc脚本。init_parse_config_file()的代码如下：
+
+<!--more-->
+
+```c
+int init_parse_config_file(const char *fn)
+{
+    char *data;
+    data = read_file(fn, 0);
+    if (!data) return -1;
+
+    parse_config(fn, data);
+    DUMP();
+    return 0;
+}
+```
+先用read_file()把脚本内容读入一块内存，而后调用parse_config()解析这块内存。
+parse_config()的代码截选如下： 
+
+```c
+static void parse_config(const char *fn, char *s)
+{
+    . . . . . . 
+    state.parse_line = parse_line_no_op;//初始化为一个空函数,后面会在parse_new_section中对其重新赋值
+    . . . . . .
+    for () {
+        switch (next_token(&state)) {
+        . . . . . .
+        case T_NEWLINE:   // 遇到新行,就该处理上一行了
+            state.line++;
+            if (nargs) {
+                int kw = lookup_keyword(args[0]);
+                if (kw_is(kw, SECTION)) {
+                    state.parse_line(&state, 0, 0);  // 不同section的parse_line也不同
+                    parse_new_section(&state, kw, nargs, args);
+                } else {
+                    state.parse_line(&state, nargs, args);//利用parse_line解析每个段除了第一行以外的其他行的内容
+                }
+                nargs = 0;
+            }
+            break;
+         case T_TEXT: //每一行所有单词都写入args数组中,当解析这一行的时候,就会用到args数组了
+            if (nargs < INIT_PARSER_MAXARGS) {
+                args[nargs++] = state.text;
+            }
+            break;
+        }
+    }
+}
+```
+它在逐行分析init.rc脚本，判断每一行的第一个参数是什么类型的，如果是action或service类型的，就表示要创建一个新的section节点了，此时它会设置一下解析后续行的解析函数，也就是给state->parse_line赋值。针对service类型，解析后续行的函数是parse_line_service()，而针对action类型，解析后续行的函数则是parse_line_action()。 
+
+parse_config()里有3个地方值得我们注意：
+
+1. lookup_keyword()和kw_is()
+
+2. parse_new_section()
+
+3. state.parse_line()
+
+#### 查询每行首单词关键字
+
+在rc文件中,没一行的第一个单词都要是关键字,意思就是说必须是Android定义好的关键字,不能随便写.
+
+lookup_keyword()的定义截选如下
+
+```c
+static int lookup_keyword(const char *s)
+{
+    switch (*s++) {
+    case 'c':
+    if (!strcmp(s, "opy")) return K_copy;
+        if (!strcmp(s, "apability")) return K_capability;
+        if (!strcmp(s, "hdir")) return K_chdir;
+        if (!strcmp(s, "hroot")) return K_chroot;
+        if (!strcmp(s, "lass")) return K_class;
+        if (!strcmp(s, "lass_start")) return K_class_start;
+        if (!strcmp(s, "lass_stop")) return K_class_stop;
+        if (!strcmp(s, "lass_reset")) return K_class_reset;
+        if (!strcmp(s, "onsole")) return K_console;
+        if (!strcmp(s, "hown")) return K_chown;
+        if (!strcmp(s, "hmod")) return K_chmod;
+        if (!strcmp(s, "ritical")) return K_critical;
+        break;
+    case 'd':
+        if (!strcmp(s, "isabled")) return K_disabled;
+        if (!strcmp(s, "omainname")) return K_domainname;
+        break;
+........................
+........................
+```
+逻辑很简单,就是以每行首单词的首字母索引匹配.
+
+那么该函数返回值是什么含义呢?
+```c
+return K_copy
+return K_capability
+...
+```
+实际上,可以理解为有一张表,存储了所有的额关键字,而上面函数的返回值就是该关键字在表中的索引.
+
+如下所示是KEYWORD的定义,参数含义是该关键字符号标示,标志,参数个数,以及用来处理这个关键字的函数.
+
+```c
+#define KEYWORD(symbol, flags, nargs, func) \
+    [ K_##symbol ] = { #symbol, func, nargs + 1, flags, },
+
+static struct {
+    const char *name;
+    int (*func)(int nargs, char **args);
+    unsigned char nargs;
+    unsigned char flags;
+} keyword_info[KEYWORD_COUNT] = {
+    [ K_UNKNOWN ] = { "unknown", 0, 0, 0 },
+#include "keywords.h"
+};
+```
+这里用到了一点儿小技巧，两次include了keywords.h头文件，其实keywords.h中会先定义一次KEYWORD宏，其主要目的是为了形成一个顺序排列的enum，而后就#undef KEYWORD了。接着上面代码中再次定义了KEYWORD宏，这次的主要目的是为了形成一个struct数组，即keyword_info数组。 
+
+keywords.h的部分代码:
+```c
+#ifndef KEYWORD
+int do_chroot(int nargs, char **args);
+int do_chdir(int nargs, char **args);
+int do_class_start(int nargs, char **args);
+. . . . . .
+. . . . . .
+#define __MAKE_KEYWORD_ENUM__
+#define KEYWORD(symbol, flags, nargs, func) K_##symbol,
+enum {
+    K_UNKNOWN,
+#endif
+    KEYWORD(capability,  OPTION,  0, 0)
+    KEYWORD(chdir,       COMMAND, 1, do_chdir)
+    KEYWORD(chroot,      COMMAND, 1, do_chroot)
+    KEYWORD(class,       OPTION,  0, 0)
+    . . . . . .
+    . . . . . .
+#ifdef __MAKE_KEYWORD_ENUM__
+    KEYWORD_COUNT,
+};
+#undef __MAKE_KEYWORD_ENUM__
+#undef KEYWORD
+#endif
+```
+第一次引用该头文件的时候KEYWORD宏没有被定义,所以会按照头文件中KEYWORD宏的定义
+```c
+// 第一次
+#define KEYWORD(symbol, flags, nargs, func) K_##symbol,
+```
+后面跟着定义了一个枚举类型数据,正好可以做索引嘛.而且头文件末尾还取消了对该宏的定义.
+
+第二次引用该头文件时,前面已经定义了该宏
+```c
+#define KEYWORD(symbol, flags, nargs, func) \
+    [ K_##symbol ] = { #symbol, func, nargs + 1, flags, },
+
+```
+所以头文件如下图所示部分,就不成立了.
+![][1]
+
+这时在拐回去看下面的代码
+
+```c
+#include "keywords.h"
+ 
+#define KEYWORD(symbol, flags, nargs, func) \
+    [ K_##symbol ] = { #symbol, func, nargs + 1, flags, },
+ 
+struct {
+    const char *name;
+    int (*func)(int nargs, char **args);
+    unsigned char nargs;
+    unsigned char flags;
+} keyword_info[KEYWORD_COUNT] = {
+    [ K_UNKNOWN ] = { "unknown", 0, 0, 0 },
+#include "keywords.h"
+};
+#undef KEYWORD
+```
+keywords.h中会先定义一次KEYWORD宏，其主要目的是为了形成一个顺序排列的enum，而后就#undef KEYWORD了。接着上面代码中再次定义了KEYWORD宏，这次的主要目的是为了形成一个struct数组，即keyword_info数组。
+
+
+这里在说下KEYWORD中第二个参数flags,它表示这个关键字的类型,有三种类型
+
+1. option: 结合service段使用,可以理解为是给可执行程序的附件配置
+
+2. command: 结合Action段使用,是一条命令
+
+3. section: 表明是action段还是Service段还是import
+
+
+
+kw_is()宏的定义如下： 
+
+```c
+#define kw_is(kw, type) (keyword_info[kw].flags & (type))
+```
+
+这个宏用来判断关键字的类型.第一个参数kw就是关键字在keyword_info中的数组下标,利用其flags位和给定的type做位与运算.
+
+rc文件中每行首单词都要进行关键字类型的判断,以此来进行相应的操作.
+
+keyword_info数组如下图所示:
+
+![keyword_info数组][2]
+
+
+### 解析section段
+
+一旦解析除rc文件某一行是on或者service或者import开头,就意味着一个新段的开始.此时会调用parse_new_section来解析这个新段
+
+```c
+static void parse_new_section(struct parse_state *state, int kw,
+                       int nargs, char **args)
+{
+    printf("[ %s %s ]\n", args[0],
+           nargs > 1 ? args[1] : "");
+    switch(kw) {
+    case K_service:
+        state->context = parse_service(state, nargs, args);
+        if (state->context) {
+            state->parse_line = parse_line_service;
+            return;
+        }
+        break;
+    case K_on:
+        state->context = parse_action(state, nargs, args);
+        if (state->context) {
+            state->parse_line = parse_line_action;
+            return;
+        }
+        break;
+    case K_import:
+        parse_import(state, nargs, args);
+        break;
+    }
+    state->parse_line = parse_line_no_op;
+}
+```
+逻辑很清晰是吧,就是解析前面提到的三种段而已.
+
+#### 解析service段
+
+parse_service()的代码如下：
+
+```c
+static void *parse_service(struct parse_state *state, int nargs, char **args)
+{
+    struct service *svc;
+    if (nargs < 3) {
+        parse_error(state, "services must have a name and a program\n");//格式 on servicename  service对应的可执行程序路径 传递给可执行程序的参数;其中参数是可选项
+        return 0;
+    }
+    if (!valid_name(args[1])) {//service name
+        parse_error(state, "invalid service name '%s'\n", args[1]);
+        return 0;
+    }
+
+    svc = service_find_by_name(args[1]);//依据服务的名字在链表中查找是否有了这个服务,有的话,不处理,说明有多个重名service的话,只会处理第一个
+    if (svc) {
+        parse_error(state, "ignored duplicate definition of service '%s'\n", args[1]);
+        return 0;
+    }
+
+    nargs -= 2;
+    svc = calloc(1, sizeof(*svc) + sizeof(char*) * nargs);//分配一个新的service结构体
+    if (!svc) {
+        parse_error(state, "out of memory\n");
+        return 0;
+    }
+    //依据解析的内容,初始化service结构体
+    svc->name = args[1];
+    svc->classname = "default";
+    memcpy(svc->args, args + 2, sizeof(char*) * nargs);
+    svc->args[nargs] = 0;
+    svc->nargs = nargs;
+    svc->onrestart.name = "onrestart";
+    /*这个service重启的时候,需要执行写命令,此时commands还是空的*/
+    list_init(&svc->onrestart.commands);
+    /*将service结构体加入service链表中去*/
+    list_add_tail(&service_list, &svc->slist);
+    return svc;
+}
+```
+总体上解析service段时,会创建一个新的service结构体，填入service名等信息，并连入service_list总表中。注意，此时该service节点的onrestart.commands部分还是个空链表，因为现在只是分析了service XXX 这一行,他下面的行还没解析.
+
+parse_new_section()中为service明确指定了解析后续行的函数parse_line_service()。
+
+
+```c
+static void parse_line_service(struct parse_state *state, int nargs, char **args)
+{
+    struct service *svc = state->context;
+    struct command *cmd;
+    . . . . . .
+    kw = lookup_keyword(args[0]);   // 同样每一行的首单词也要查关键字表
+    switch (kw) {
+    case K_capability:
+        break;
+    case K_class:
+        if (nargs != 2) {
+            parse_error(state, "class option requires a classname\n");
+        } else {
+            svc->classname = args[1];
+        }
+        break;
+    case K_console:
+        svc->flags |= SVC_CONSOLE;
+        break;
+case K_disabled:
+. . . . . .
+case K_onrestart:
+        nargs--;
+        args++;
+        kw = lookup_keyword(args[0]);
+        if (!kw_is(kw, COMMAND)) {
+            parse_error(state, "invalid command '%s'\n", args[0]);
+            break;
+        }
+        kw_nargs = kw_nargs(kw);
+        if (nargs < kw_nargs) {
+            parse_error(state, "%s requires %d %s\n", args[0], kw_nargs - 1,
+                kw_nargs > 2 ? "arguments" : "argument");
+            break;
+        }
+        cmd = malloc(sizeof(*cmd) + sizeof(char*) * nargs);
+        cmd->func = kw_func(kw);
+        cmd->nargs = nargs;
+        memcpy(cmd->args, args, sizeof(char*) * nargs);
+        list_add_tail(&svc->onrestart.commands, &cmd->clist);
+        break;
+. . . . . .
+service的的option中比较麻烦的是onrestart，因为它本身又是个action段，可携带若干个子command. 
+```
+下面是service中常见的option：
+```
+1)K_capability
+2)K_class
+3)K_console
+4)K_disabled
+5)K_ioprio
+6)K_group
+7)K_user下面是service中常见的option：
+1)K_capability
+2)K_class
+3)K_console
+4)K_disabled
+5)K_ioprio
+6)K_group
+7)K_user
+8)K_keycodes
+9)K_oneshot
+10)K_onrestart
+11)K_critical
+12)K_setenv
+13)K_socket
+14)K_seclabel 
+8)K_keycodes
+9)K_oneshot
+10)K_onrestart
+11)K_critical
+12)K_setenv
+13)K_socket
+14)K_seclabel 
+```
+
+
+再次回头看 parse_config函数,else部分是不是就很清楚了.
+
+![][3]
+
+service 结构体定义如下
+
+```c
+struct service {
+        /* list of all services */
+    struct listnode slist;
+
+    const char *name;
+    const char *classname;
+
+    unsigned flags;
+    pid_t pid;
+    time_t time_started;    /* time of last start */
+    time_t time_crashed;    /* first crash within inspection window */
+    int nr_crashed;         /* number of times crashed within window */
+    
+    uid_t uid;
+    gid_t gid;
+    gid_t supp_gids[NR_SVC_SUPP_GIDS];
+    size_t nr_supp_gids;
+
+    char *seclabel;
+
+    struct socketinfo *sockets;
+    struct svcenvinfo *envvars;
+
+    struct action onrestart;  /* Actions to execute on restart. */
+    
+    /* keycodes for triggering this service via /dev/keychord */
+    int *keycodes;
+    int nkeycodes;
+    int keychord_id;
+
+    int ioprio_class;
+    int ioprio_pri;
+
+    int nargs;
+    /* "MUST BE AT THE END OF THE STRUCT" */
+    char *args[1];
+}; /*     ^-------'args' MUST be at the end of this struct! */
+```
+
+当rc文件解析完之后,所有的service会在一个service_list链表中去,注意重名的service只会被解析一个.
+
+#### 解析action段
+
+和解析service段几乎一样,这里会申请一个action结构体,并且初始化他,然后加入一个action_list链表中去.
+
+```c
+static void *parse_action(struct parse_state *state, int nargs, char **args)
+{
+    struct action *act;
+    if (nargs < 2) {
+        parse_error(state, "actions must have a trigger\n");
+        return 0;
+    }
+    if (nargs > 2) {
+        parse_error(state, "actions may not have extra parameters\n");
+        return 0;
+    }
+    act = calloc(1, sizeof(*act));
+    act->name = args[1];
+    list_init(&act->commands);//commands还是空的,会在parse_line_action中被初始化
+    list_init(&act->qlist);
+    list_add_tail(&action_list, &act->alist);//加入action_list链表
+        /* XXX add to hash */
+    return act;
+}
+```
+
+
+```c
+static void parse_line_action(struct parse_state* state, int nargs, char **args)
+{
+    struct command *cmd;
+    struct action *act = state->context;
+    int (*func)(int nargs, char **args);
+    int kw, n;
+
+    if (nargs == 0) {
+        return;
+    }
+
+    kw = lookup_keyword(args[0]);//当然要查看关键字了,因为已经为每个关键字都事先定义好了处理函数了
+    if (!kw_is(kw, COMMAND)) {
+        parse_error(state, "invalid command '%s'\n", args[0]);
+        return;
+    }
+
+    n = kw_nargs(kw);
+    if (nargs < n) {
+        parse_error(state, "%s requires %d %s\n", args[0], n - 1,
+            n > 2 ? "arguments" : "argument");
+        return;
+    }
+    cmd = malloc(sizeof(*cmd) + sizeof(char*) * nargs);
+    cmd->func = kw_func(kw);
+    cmd->line = state->line;
+    cmd->filename = state->filename;
+    cmd->nargs = nargs;
+    memcpy(cmd->args, args, sizeof(char*) * nargs);
+    list_add_tail(&act->commands, &cmd->clist);//这里初始化了commands!!!!
+}
+```
+
+#### 解析import
+
+```c
+static void parse_import(struct parse_state *state, int nargs, char **args)
+{
+    struct listnode *import_list = state->priv;
+    struct import *import;
+    char conf_file[PATH_MAX];
+    int ret;
+
+    if (nargs != 2) {
+        ERROR("single argument needed for import\n");
+        return;
+    }
+
+    ret = expand_props(conf_file, args[1], sizeof(conf_file));
+    if (ret) {
+        ERROR("error while handling import on line '%d' in '%s'\n",
+              state->line, state->filename);
+        return;
+    }
+
+    import = calloc(1, sizeof(struct import));
+    import->filename = strdup(conf_file);
+    list_add_tail(import_list, &import->list);
+    INFO("found import '%s', adding to import list", import->filename);
+}
+```
+import段处理很简单，parse_import()函数只是把脚本中的所有import语句先汇总成一个链表，记入state结构中，parse_config()会做处理
+
+parse_config末尾
+```c
+parser_done:
+    list_for_each(node, &import_list) {
+         struct import *import = node_to_item(node, struct import, list);
+         int ret;
+
+         INFO("importing '%s'", import->filename);
+         ret = init_parse_config_file(import->filename);
+         if (ret)
+             ERROR("could not import file '%s' from '%s'\n",
+                   import->filename, fn);
+    }
+```
+
+### 总结
+
+init_parse_config_file("/init.rc")执行后,会形成两个链表:action_list和service_list.
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/Android_init_2-1.PNG
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-init-2-1.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-init-2-2.png
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

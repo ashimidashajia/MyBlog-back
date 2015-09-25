@@ -4,7 +4,7 @@ layout: post
 title: 持续集成系统搭建之Phabricator篇
 categories: 项目管理
 tags: [代码管理]
-
+date: 2015-09-20 15:43:13
 ---
  
 现在开始搭建代码评审环境，Phabricator是FaceBook的一个开源工具，非常流行，支持代码提交前审阅和代码提交后审阅。

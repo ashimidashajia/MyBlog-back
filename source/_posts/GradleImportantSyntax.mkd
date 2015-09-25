@@ -3,7 +3,7 @@ layout: post
 title: Gradle构建中的重要语法
 categories: 项目管理
 tags: [Gradle,构建]
-
+date : 2015-09-17 15:39:11
 ---
 
 上一篇博客中，我们简单的利用Gradle从零开始构建了一个简单的Android app项目，对build.gradle中的有些语法，可能不是很熟悉，所以很有必要理解Gradle的重要语法。通过这边文章，希望能读懂简单build,gradle，最重要的是如何查阅文档。

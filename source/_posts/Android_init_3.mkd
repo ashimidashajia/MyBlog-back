@@ -1,0 +1,418 @@
+---
+layout: post
+title: Android 5.1 Lollipop init分析下篇
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2015-09-25 15:59:55
+---
+
+前面我们只是解析了rc文件,并且将其内容填充到了两个链表:action_list和service_list中去.那么这些action和service是怎么被执行的呢?现在就来详细分析下吧.
+
+<!--more-->
+
+### action的执行
+
+每个action都对应一个action结构体,存储在action_list链表中,还要注意的是,在rc文件之外,我们也能调用一些函数,来手动创建action,并将其添加到action_list中去.
+
+在init.c的main函数中,会看到有如下的代码:
+
+```c
+int main(int argc, char **argv)
+{
+    . . . . . .
+    . . . . . .
+    init_parse_config_file("/init.rc");  // 内部将脚本内容转换成action链表了
+ 
+    action_for_each_trigger("early-init", action_add_queue_tail);
+ 
+    queue_builtin_action(wait_for_coldboot_done_action, 
+                         "wait_for_coldboot_done");
+    queue_builtin_action(mix_hwrng_into_linux_rng_action, 
+                         "mix_hwrng_into_linux_rng");
+    queue_builtin_action(keychord_init_action, "keychord_init");
+    queue_builtin_action(console_init_action, "console_init");
+ 
+    /* execute all the boot actions to get us started */
+    action_for_each_trigger("init", action_add_queue_tail);
+    . . . . . .
+    . . . . . .
+}
+```
+这里又衍生出了另一个链表action_queue.那么这个链表如何添加元素呢?很显然是用到了action_add_queue_tail函数了.
+
+另外前面我们说了action会在某个条件满足时,触发执行.那么显然这个触发工作是由action_for_each_trigger函数完成的.
+
+```c
+void action_for_each_trigger(const char *trigger,
+                             void (*func)(struct action *act))
+{
+    struct listnode *node;
+    struct action *act;
+    list_for_each(node, &action_list) {
+        act = node_to_item(node, struct action, alist);
+        if (!strcmp(act->name, trigger)) {
+            func(act);  // 只要匹配，就回调func
+        }
+    }
+}
+```
+可以看到是在遍历action_list链表，找寻所有“action名”和“参数trigger”匹配的节点，并回调“参数func所指的回调函数”。在前面的代码中，回调函数就是action_add_queue_tail()。 
+
+```c
+void action_add_queue_tail(struct action *act)
+{
+    if (list_empty(&act->qlist)) {
+        list_add_tail(&action_queue, &act->qlist);
+    }
+}
+```
+action_queue和action_list这两个链表有什么联系呢?
+
+实际上action_list链表中存放的是所有的action段结构体,而action_queue链表中存放的action是即将要被执行的action,而且每执行一个action,这个action就会从action_queue链表中删除,但是action_list中依然还有这个action.
+
+利用queue_builtin_action可以创建一个rc文件中没有的action:
+
+```c
+void queue_builtin_action(int (*func)(int nargs, char **args), char *name)
+{
+    struct action *act;
+    struct command *cmd;
+ 
+    act = calloc(1, sizeof(*act));
+    act->name = name;
+    list_init(&act->commands);
+    list_init(&act->qlist);
+ 
+    cmd = calloc(1, sizeof(*cmd));
+    cmd->func = func;
+    cmd->args[0] = name;
+    list_add_tail(&act->commands, &cmd->clist);
+ 
+    list_add_tail(&action_list, &act->alist);
+    action_add_queue_tail(act);
+}
+
+```
+
+
+新建的action会被添加到action_list和action_queue链表中.
+
+
+#### action的执行顺序
+
+rc文件中有那么多action,这些action是按照什么顺序执行的?总不能胡乱执行吧.
+
+还记得前面我们提到的init有若干执行阶段吧.每个阶段,就会执行若干action.
+
+<font color="#ff5588">early-init阶段 </font>
+
+early-init=========>init===========>late-init============>early-fs============>fs===========>post-fs============>post-fs-data===========>early-boot===========>boot
+
+在init.c的main函数中,可以看到
+
+```c
+
+action_for_each_trigger("early-init", action_add_queue_tail);
+
+action_for_each_trigger("init", action_add_queue_tail);
+
+ action_for_each_trigger("late-init", action_add_queue_tail);
+
+```
+只有上面三个阶段显示的调用了action_for_each_trigger函数,那么其他几个阶段是被如何触发的呢?
+
+还记得最开始讲解触发的时候,提到的手动触发命令:trigger吗.剩下的几个阶段都在init.rc中利用trigger命令触发,trigger关键字对应的处理函数do_trigger内部会调用 action_for_each_trigger函数.
+
+例如:
+```bash
+on late-init
+    trigger early-fs
+    trigger fs
+    trigger post-fs
+    trigger post-fs-data
+
+    # Load properties from /system/ + /factory after fs mount. Place
+    # this in another action so that the load will be scheduled after the prior
+    # issued fs triggers have completed.
+    trigger load_all_props_action
+
+    # Remove a file to wake up anything waiting for firmware.
+    trigger firmware_mounts_complete
+
+    trigger early-boot
+    trigger boot
+```
+至于每个阶段内部执行action的顺序,那么就不是很重要了,如果真的要同步某些action的话,可以利用属性.
+
+
+
+#### 执行action_queue链表中的action
+
+init.c main函数中的for循环
+
+```c
+ for() {
+        int nr, i, timeout = -1;
+
+        execute_one_command();
+        restart_processes();
+. . . . 
+```
+
+```c
+void execute_one_command(void)
+{
+    int ret, i;
+    char cmd_str[256] = "";
+
+    if (!cur_action || !cur_command || is_last_command(cur_action, cur_command)) {
+        cur_action = action_remove_queue_head();
+        cur_command = NULL;
+        if (!cur_action)
+            return;
+        INFO("processing action %p (%s)\n", cur_action, cur_action->name);
+        cur_command = get_first_command(cur_action);
+    } else {
+        cur_command = get_next_command(cur_action, cur_command);
+    }
+
+    if (!cur_command)
+        return;
+
+    ret = cur_command->func(cur_command->nargs, cur_command->args);
+    if (klog_get_level() >= KLOG_INFO_LEVEL) {
+        for (i = 0; i < cur_command->nargs; i++) {
+            strlcat(cmd_str, cur_command->args[i], sizeof(cmd_str));
+            if (i < cur_command->nargs - 1) {
+                strlcat(cmd_str, " ", sizeof(cmd_str));
+            }
+        }
+        INFO("command '%s' action=%s status=%d (%s:%d)\n",
+             cmd_str, cur_action ? cur_action->name : "", ret, cur_command->filename,
+             cur_command->line);
+    }
+}
+```
+执行“当前action”（cur_action）的“当前command”（cur_command）。如果执行时没有“当前action”，就尝试从action_queue队列的头部摘取一个节点。如果执行时没有“当前command”，就从“当前action”中获取下一个该执行的command。而一旦得到了该执行的command，就回调其func函数指针.
+
+
+### service的执行
+
+那么service是如何启动的呢?其实service是靠action来启动的,在某些action中可以利用start命令来启动service,也可以利用class_start命令来启动一类或者说一组service.
+
+例如 在 on boot的末尾class_start core,说明boot阶段,会触发执行core类中的所有service.
+
+另外init进程中启动的都是android的核心服务,这些service如果被杀掉的话,通常都会自动重启,实际上是利用信号机制来达到这个目的的.
+
+init.c main函数中:
+
+```c
+ queue_builtin_action(signal_init_action, "signal_init");
+```
+system/core/init/Signal_handler.c
+
+```c
+void signal_init(void)
+{
+    int s[2];
+ 
+ 
+    struct sigaction act;
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = sigchld_handler;
+    act.sa_flags = SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &act, 0);   // 向系统注册一个系统回调
+ 
+    /* create a signalling mechanism for the sigchld handler */
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, s) == 0) {
+        signal_fd = s[0];  // 以后回调函数会向这个fd写数据
+        signal_recv_fd = s[1];
+        fcntl(s[0], F_SETFD, FD_CLOEXEC);
+        fcntl(s[0], F_SETFL, O_NONBLOCK);
+        fcntl(s[1], F_SETFD, FD_CLOEXEC);
+        fcntl(s[1], F_SETFL, O_NONBLOCK);
+    }
+ 
+    handle_signal();
+}
+```
+signal_init()中调用了sigaction(SIGCHLD,...)一句。在linux系统中，当一个进程终止或者停止时，系统会向其父进程发送SIGCHLD信号。sigaction()动作可以被理解为向系统注册一个系统回调函数。每当有子进程终止时，系统就会回调sigchld_handler()回调函数，该函数的代码如下：
+
+```c
+static void sigchld_handler(int s)
+{
+    write(signal_fd, &s, 1);
+}
+```
+无非是向signal_init()中创建的“socket对”里的signal_fd写数据，于是“socket对”的另一个句柄signal_recv_fd就可以得到所写的数据。 
+
+
+在init进程的main()函数中，最终进入那个无限for循环，监听系统的风吹草动，其中就包括监听这个signal_recv_fd
+
+```c
+int main(int argc, char **argv)
+{
+    . . . . . .
+    . . . . . .
+    for() {
+        . . . . . .
+        if (!signal_fd_init && get_signal_fd() > 0) {
+            ufds[fd_count].fd = get_signal_fd();  // 就是signal_recv_fd ！
+            ufds[fd_count].events = POLLIN;
+            ufds[fd_count].revents = 0;
+            fd_count++;
+            signal_fd_init = 1;
+        }
+        . . . . . .
+        . . . . . .
+        nr = poll(ufds, fd_count, timeout);
+        . . . . . .
+        for (i = 0; i < fd_count; i++) {
+            if (ufds[i].revents == POLLIN) {
+                if (ufds[i].fd == get_property_set_fd())
+                    handle_property_set_fd();  // 处理设置属性的命令
+                else if (ufds[i].fd == get_keychord_fd())
+                    handle_keychord();    // 处理类似混合按键的命令，类似同时按
+                                             // 钢琴上的若干键
+                else if (ufds[i].fd == get_signal_fd())
+                    handle_signal();    // 处理因子进程挂掉而发来的信号
+            }
+        }
+    }
+    . . . . . .
+}
+```
+当监听到signal_recv_fd有动静时，会调用handle_signal()来处理： 
+
+```c
+void handle_signal(void)
+{
+    char tmp[32];
+ 
+    /* we got a SIGCHLD - reap and restart as needed */
+    read(signal_recv_fd, tmp, sizeof(tmp));
+    while (!wait_for_one_process(0))
+        ;
+}
+```
+
+```c
+static int wait_for_one_process(int block)
+{
+    . . . . . .
+while ( (pid = waitpid(-1, &status, block ? 0 : WNOHANG)) == -1 
+          && errno == EINTR );
+    . . . . . .
+    svc = service_find_by_pid(pid);   // 查询出是哪个service进程挂掉了
+    . . . . . .
+ 
+    svc->pid = 0;
+    svc->flags &= (~SVC_RUNNING);
+ 
+    if ((svc->flags & SVC_ONESHOT) && !(svc->flags & SVC_RESTART)) {
+        svc->flags |= SVC_DISABLED;
+    }
+    if (svc->flags & (SVC_DISABLED | SVC_RESET) )  {
+        notify_service_state(svc->name, "stopped");
+        return 0;
+    }
+    . . . . . .
+ 
+    svc->flags &= (~SVC_RESTART);
+    svc->flags |= SVC_RESTARTING;
+ 
+    /* Execute all onrestart commands for this service. */
+    list_for_each(node, &svc->onrestart.commands) {
+        cmd = node_to_item(node, struct command, clist);
+        cmd->func(cmd->nargs, cmd->args);
+    }
+    notify_service_state(svc->name, "restarting");
+    return 0;
+}
+```
+该函数的代码比较清晰，当init进程被通知某个子进程终止时，它会尝试找到这个子进程对应的service节点，并辗转给该节点的flags域添加SVC_RESTARTING标记，然后又会马上执行这个service节点中所有onrestart选项对应的动作。
+
+
+代码中处理SVC_ONESHOT的地方多判断了SVC_RESTART标志,因为SVC_ONESHOT表达的意思是“只打一枪”，也就是说以它装饰的service进程，就算挂掉了，也不会重新启动。然而必须兼顾到其他进程restart的情况。假如有另一个进程会连锁restart该service，此时就算该service有SVC_ONESHOT标志，它还是应该再次启动的。 
+
+svc节点的onrestart域本身就是个action类型的域： 
+
+```c
+struct action onrestart;
+```
+
+现在开始遍历onrestart域里的commands列表： 
+
+```
+list_for_each(node, &svc->onrestart.commands) {
+    cmd = node_to_item(node, struct command, clist);
+    cmd->func(cmd->nargs, cmd->args);
+}
+```
+
+最后，wait_for_one_process()还会调用一下notify_service_state()。毕竟这是因为某个service挂掉了，才会再走到这里的，现在我们马上就要重新启动那个刚死的service啦，所以最好还是做一些必要的“通知动作”。请注意，这种关于重启service的“通知”并不是简单发个事件什么的，而是设置某个相应的系统属性。具体的动作请看notify_service_state()的代码：
+
+```c
+void notify_service_state(const char *name, const char *state)
+{
+    char pname[PROP_NAME_MAX];
+    int len = strlen(name);
+    if ((len + 10) > PROP_NAME_MAX)
+        return;
+    snprintf(pname, sizeof(pname), "init.svc.%s", name);
+    property_set(pname, state);
+}
+```
+会设置一个以“init.svc.”打头的系统属性。比如重启zygote服务，此时就会把“init.svc.zygote”属性值设为“SVC_RESTARTING”。 
+
+
+wait_for_one_process()里根本没有fork动作。这也就是说，wait_for_one_process()中并不会立即重启新的service进程。大家都知道现在我们正处于init进程的无限for循环中，所以程序从wait_for_one_process()返回后，总会再次走到for循环中的restart_processes()： 
+
+
+```c
+int main(int argc, char **argv)
+{
+    . . . . .
+    for() {
+        int nr, i, timeout = -1;
+        execute_one_command();
+        restart_processes(); 
+```
+此时才会重启新的进程：
+
+
+```c
+static void restart_processes()
+{
+    process_needs_restart = 0;
+    service_for_each_flags(SVC_RESTARTING, restart_service_if_needed);
+}
+```
+遍历service_list列表，找出那些flags中携带有SVC_RESTARTING标志的service节点，并执行restart_service_if_needed函数
+
+```c
+static void restart_service_if_needed(struct service *svc)
+{
+    time_t next_start_time = svc->time_started + 5;
+ 
+    if (next_start_time <= gettime()) {
+        svc->flags &= (~SVC_RESTARTING);
+        service_start(svc, NULL);
+        return;
+    }
+ 
+    if ((next_start_time < process_needs_restart) ||
+        (process_needs_restart == 0)) {
+        process_needs_restart = next_start_time;
+    }
+}
+```
+为了防止出现service连续紧密重启的情况，next_start_time会赋值为svc->time_started + 5，也就是说，至少得喘息个5毫秒，然后才能进行下一次重启。这就是Android中重启service的具体流程。 
+
+
+init还有一个是组合键启动某个service,但是现在用的不多了,也就不说了.
+
+
+### 总结
+
+init进程中有三个链表,action_list,action_queue,service_list.其中action_queue中是当前要被执行的action,会在init中的for循环中被循环检测执行.service是通过action中的start或者class_start触发执行的.service的重启利用到了signal信号的机制.服务被重启后,会设置init.srv.servicename的属性值为SVC_RESTARTING.service的重启也是在for循环中执行的,如果某个服务频繁重启,那么至少间隔5毫秒.

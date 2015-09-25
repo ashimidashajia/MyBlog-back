@@ -4,7 +4,7 @@ layout: post
 title: 持续集成系统搭建之Jenkins篇
 categories: 项目管理
 tags: [代码管理]
-
+date: 2015-09-19 13:41:52
 ---
  
 现在开始搭建Jenkins环境，他的主要作用是每当有代码经过审阅提交到gitlab之后，自动拉取代码，编译运行和测试。
