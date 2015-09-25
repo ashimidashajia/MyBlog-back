@@ -1,6 +1,6 @@
 ---
 layout: post
-title: Android 5.1 Lollipop init分析下篇
+title: Android 5.1 init进程分析下篇
 categories: Android底层开发
 tags: [Android核心服务]
 date: 2015-09-25 15:59:55
@@ -415,4 +415,4 @@ init还有一个是组合键启动某个service,但是现在用的不多了,也�
 
 ### 总结
 
-init进程中有三个链表,action_list,action_queue,service_list.其中action_queue中是当前要被执行的action,会在init中的for循环中被循环检测执行.service是通过action中的start或者class_start触发执行的.service的重启利用到了signal信号的机制.服务被重启后,会设置init.srv.servicename的属性值为SVC_RESTARTING.service的重启也是在for循环中执行的,如果某个服务频繁重启,那么至少间隔5毫秒.
+init进程中有三个链表,action_list,action_queue,service_list.其中action_queue中是当前要被执行的action,会在init中的for循环中被循环检测执行,而且执行完后,就会从action_queue链表中删除.service是通过action中的start或者class_start触发执行的.service的重启利用到了signal信号的机制.服务被重启后,会设置init.srv.servicename的属性值为SVC_RESTARTING.service的重启也是在for循环中执行的,如果某个服务频繁重启,那么至少间隔5毫秒.
