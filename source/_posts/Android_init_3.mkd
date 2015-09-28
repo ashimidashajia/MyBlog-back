@@ -332,6 +332,21 @@ while ( (pid = waitpid(-1, &status, block ? 0 : WNOHANG)) == -1
 ```
 该函数的代码比较清晰，当init进程被通知某个子进程终止时，它会尝试找到这个子进程对应的service节点，并辗转给该节点的flags域添加SVC_RESTARTING标记，然后又会马上执行这个service节点中所有onrestart选项对应的动作。
 
+定义的service flags有:
+```c
+#define SVC_DISABLED    0x01  /* do not autostart with class */
+#define SVC_ONESHOT     0x02  /* do not restart on exit */
+#define SVC_RUNNING     0x04  /* currently active */
+#define SVC_RESTARTING  0x08  /* waiting to restart */
+#define SVC_CONSOLE     0x10  /* requires console */
+#define SVC_CRITICAL    0x20  /* will reboot into recovery if keeps crashing */
+#define SVC_RESET       0x40  /* Use when stopping a process, but not disabling
+                                 so it can be restarted with its class */
+#define SVC_RC_DISABLED 0x80  /* Remember if the disabled flag was set in the rc script */
+#define SVC_RESTART     0x100 /* Use to safely restart (stop, wait, start) a service */
+#define SVC_DISABLED_START 0x200 /* a start was requested but it was disabled at the time 
+```
+
 
 代码中处理SVC_ONESHOT的地方多判断了SVC_RESTART标志,因为SVC_ONESHOT表达的意思是“只打一枪”，也就是说以它装饰的service进程，就算挂掉了，也不会重新启动。然而必须兼顾到其他进程restart的情况。假如有另一个进程会连锁restart该service，此时就算该service有SVC_ONESHOT标志，它还是应该再次启动的。 
 
@@ -415,4 +430,4 @@ init还有一个是组合键启动某个service,但是现在用的不多了,也�
 
 ### 总结
 
-init进程中有三个链表,action_list,action_queue,service_list.其中action_queue中是当前要被执行的action,会在init中的for循环中被循环检测执行,而且执行完后,就会从action_queue链表中删除.service是通过action中的start或者class_start触发执行的.service的重启利用到了signal信号的机制.服务被重启后,会设置init.srv.servicename的属性值为SVC_RESTARTING.service的重启也是在for循环中执行的,如果某个服务频繁重启,那么至少间隔5毫秒.
+init进程中有三个链表,action_list,action_queue,service_list.其中action_queue中是当前要被执行的action,会在init中的for循环中被循环检测执行,而且执行完后,就会从action_queue链表中删除.service是通过action中的start或者class_start触发执行的.service的重启利用到了signal信号的机制.服务被重启的时候,会设置init.srv.servicename的属性值为SVC_RESTARTING,成功重启后会设置为SVC_RUNNING .service的重启也是在for循环中执行的,如果某个服务频繁重启,那么至少间隔5毫秒.

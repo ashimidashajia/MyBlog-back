@@ -1,0 +1,346 @@
+---
+layout: post
+title: Android 5.1 property属性系统分析上篇
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2015-09-26 00:27:43
+---
+
+
+### 简介
+
+在"init进程分析"系统文章中,主要介绍了init进程如何处理rc文件,没有过多讲解init进程启动的相关核心服务.例如Android属性系统等,接下来的会逐个讲解init进程启动的核心android服务.
+
+Android属性系统其实可以理解为键值对:属性名字和属性值;很类似于windows上的注册表.
+
+我们可以通过在adb shell里敲入getprop命令来获取当前系统的所有属性内容:
+
+```bash
+root@generic_x86_64:/ # getprop                                                
+[ARGH]: [ARGH]
+[dalvik.vm.dex2oat-Xms]: [64m]
+[dalvik.vm.dex2oat-Xmx]: [512m]
+[dalvik.vm.heapsize]: [64m]
+[dalvik.vm.image-dex2oat-Xms]: [64m]
+[dalvik.vm.image-dex2oat-Xmx]: [64m]
+...................................
+```
+<!--more-->
+
+我们还可以敲入类似“getprop 属性名”的命令来获取特定属性的值。另外，设置属性值的方法也很简单，只需敲入“setprop 属性名 新值”命令即可。
+
+Android 属性机制如下图所示:
+
+![android 属性][1]
+
+大部分属性是记录在某些文件中的,Android系统会在init进程启动的时候,加载这些文件,初始化属性系统.那些属性键值对是存储在一块儿共享内存中的,所有的属性都可以直读取,但是不能直接设置属性.设置属性的时候,必须依赖于property service.实际上就是socket通信.
+
+总的来说有以下特点:
+
+```
+1）  系统一启动就会从若干属性脚本文件中加载属性内容；
+2）  系统中的所有属性（key/value）会存入同一块共享内存中；
+3）  系统中的各个进程会将这块共享内存映射到自己的内存空间，这样就可以直接读取属性内容了；
+4）  系统中只有一个实体可以设置、修改属性值，它就是属性服务（Property Service）；
+5）  不同进程只可以通过socket方式，向属性服务发出修改属性值的请求，而不能直接修改属性值；
+6）  共享内存中的键值内容会以一种字典树的形式进行组织。
+```
+存储属性的文件:
+```
+  /default.prop
+  /system/build.prop
+  /system/default.prop（该文件不一定存在）
+  /data/local.prop
+  /data/property目录里的若干脚本
+```
+以ro开头的属性都是只读属性,以persist开头的属性,一般都是从/data/property目录中加载的.
+
+个人理解属性系统有两个作用:
+```
+１，设置属性触发相应动作
+２，作为程序中的判断条件
+```
+
+### 初始化共享内存
+
+属性是存储在共享内存中的,而要在使用共享内存之前呢,又必须要先初始化共享内存.初始化之后,肯定要加载那些存储属性的文件等等.这些都是init进程中完成的.
+
+init.c 的main函数中调用了property_init函数
+
+```c
+void property_init(void)
+{
+    init_property_area();
+}
+```
+
+```c
+static int init_property_area(void)
+{
+    if (property_area_inited)
+        return -1;
+
+    if(__system_property_area_init())//会以读写方式打开/dev/__properties__
+        return -1;
+
+    if(init_workspace(&pa_workspace, 0))//这里面会以只读方式再次打开/dev/__properties__
+        return -1;
+
+    fcntl(pa_workspace.fd, F_SETFD, FD_CLOEXEC);
+
+    property_area_inited = 1;//表明共享内存已经被初始化了
+    return 0;
+}
+
+```
+system_property_area_init用来初始化共享内存.
+
+```c
+int __system_property_area_init()
+{
+    return map_prop_area_rw();
+}
+```
+```c
+static int map_prop_area_rw()
+{
+    /* dev is a tmpfs that we can use to carve a shared workspace
+     * out of, so let's do that...
+     */
+    //proerty_file是 /dev/__properties__,要注意,这里是以可读可写方式打开的,这个文件描述符是给property service使用的
+    const int fd = open(property_filename,
+                        O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_EXCL, 0444);
+
+    if (fd < 0) {
+        if (errno == EACCES) {
+            /* for consistency with the case where the process has already
+             * mapped the page in and segfaults when trying to write to it
+             */
+            abort();
+        }
+        return -1;
+    }
+
+    // TODO: Is this really required ? Does android run on any kernels that
+    // don't support O_CLOEXEC ?
+    const int ret = fcntl(fd, F_SETFD, FD_CLOEXEC);
+    if (ret < 0) {
+        close(fd);
+        return -1;
+    }
+
+    if (ftruncate(fd, PA_SIZE) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    pa_size = PA_SIZE;
+    pa_data_size = pa_size - sizeof(prop_area);
+    compat_mode = false;
+
+    //----------------pa_size大小为128K
+    void *const memory_area = mmap(NULL, pa_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (memory_area == MAP_FAILED) {
+        close(fd);
+        return -1;
+    }
+
+    prop_area *pa = new(memory_area) prop_area(PROP_AREA_MAGIC, PROP_AREA_VERSION);
+
+    /* plug into the lib property services */
+    __system_property_area__ = pa;//共享内存的起始地址存储在这个全局变量上
+
+    close(fd);
+    return 0;
+}
+
+```
+我们可以看到，在init进程的main()函数里，打开了一个设备文件“/dev/__properties__”，并把它设定为128KB大小，接着调用mmap()将这块内存映射到init进程空间了。这个内存的首地址被记录在__system_property_area__全局变量里，以后每添加或修改一个属性，都会基于这个__system_property_area__变量来计算位置。
+
+
+在来看下面的函数:
+```c
+static int init_workspace(workspace *w, size_t size)//size传入的参数值是0
+{
+    void *data;
+    int fd = open(PROP_FILENAME, O_RDONLY | O_NOFOLLOW);//以只读的方式再次打开/dev/__properties__,
+    if (fd < 0)
+        return -1;
+
+    w->size = size;
+    w->fd = fd;
+    return 0;
+}
+
+```
+打开的句柄记录在pa_workspace.fd处，以后每当init进程调用service_start()时，会执行下面的代码
+
+```c
+   if (properties_inited()) {
+            get_property_workspace(&fd, &sz);
+            sprintf(tmp, "%d,%d", dup(fd), sz);
+            add_environment("ANDROID_PROPERTY_WORKSPACE", tmp);
+        }
+```
+说白了就是把 pa_workspace.fd 的句柄记入一个名叫“ ANDROID_PROPERTY_WORKSPACE ”的环境变量去,另外size似乎没什么用,一直是0.
+
+```bash
+root@generic_x86_64:/ # echo $ANDROID_PROPERTY_WORKSPACE                       
+8,0
+
+```
+存入环境变量的作用是其他进程可以很方便拿到文件描述符fd,利用这个fd就可以读取属性值了.
+
+为什么要两次open那个/dev/__properties__文件呢？是这样的：第一次open的句柄，最终是给属性服务自己用的，所以需要有读写权限；而第二次open的句柄，会被记入pa_workspace.fd，并在合适时机添加进环境变量，供其他进程使用，因此只能具有读取权限。
+
+### 初始化属性系统
+
+main()函数在设置好属性内存块之后，会调用queue_builtin_action()函数向内部的action_list列表添加一个action.后续，系统会在合适时机回调“由queue_builtin_action()的参数”所指定的property_service_init_action()函数.
+
+```c
+static int property_service_init_action(int nargs, char **args)
+{
+    /* read any property files on system or data and
+     * fire up the property service.  This must happen
+     * after the ro.foo properties are set above so
+     * that /data/local.prop cannot interfere with them.
+     */
+    start_property_service();
+    if (get_property_set_fd() < 0) {
+        ERROR("start_property_service() failed\n");
+        exit(1);
+    }
+
+    return 0;
+}
+```
+```c
+void start_property_service(void)
+{
+    int fd;
+
+
+    fd = create_socket(PROP_SERVICE_NAME, SOCK_STREAM, 0666, 0, 0, NULL);
+    if(fd < 0) return;
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    fcntl(fd, F_SETFL, O_NONBLOCK);
+
+    listen(fd, 8);
+    property_set_fd = fd;
+}
+```
+很简单,就是创建了一个套接字,然后监听.这个套接字是UNIX域的,在/dev/socket/property_service.
+
+这个socket是专门用来监听其他进程发来的“修改”属性值的命令的，它被设置成“非阻塞”（O_NONBLOCK）的socket。 
+
+
+### 加载属性文件
+
+属性文件位置:
+```c
+#define PROP_PATH_RAMDISK_DEFAULT  "/default.prop"
+#define PROP_PATH_SYSTEM_BUILD     "/system/build.prop"
+#define PROP_PATH_SYSTEM_DEFAULT   "/system/default.prop"
+#define PROP_PATH_VENDOR_BUILD     "/vendor/build.prop"
+#define PROP_PATH_LOCAL_OVERRIDE   "/data/local.prop"
+#define PROP_PATH_FACTORY          "/factory/factory.prop"
+```
+
+属性文件的加载也是在init.c的main函数中.
+
+```c
+   INFO("property init\n");
+    property_load_boot_defaults();
+```
+core/init/Property_service.c:
+```c
+void property_load_boot_defaults(void)
+{
+    load_properties_from_file(PROP_PATH_RAMDISK_DEFAULT, NULL);//加载/default.prop
+}
+```
+这里只是加载了根目录下的default.prop.也就是ramdisk中的default.prop,那么其他属性文件却没有在main函数中看到有加载.那就只有一种可能了,就是rc文件中肯定有与属性相关的段.
+
+init.rc中,果不其然有与属性相关的段:
+```bash
+on load_all_props_action
+    load_all_props
+
+on late-init
+    ...............................
+    trigger load_all_props_action
+    ...............................
+```
+load_all_props是一个关键字,其处理函数为:
+
+```c
+int do_load_all_props(int nargs, char **args) {
+    if (nargs == 1) {
+        load_all_props();
+        return 0;
+    }
+    return -1;
+}
+
+```
+core/init/Property_service.c:
+```c
+void load_all_props(void)
+{
+    load_properties_from_file(PROP_PATH_SYSTEM_BUILD, NULL);
+    load_properties_from_file(PROP_PATH_SYSTEM_DEFAULT, NULL);
+    load_properties_from_file(PROP_PATH_VENDOR_BUILD, NULL);
+    load_properties_from_file(PROP_PATH_FACTORY, "ro.*");
+
+    load_override_properties();
+
+    /* Read persistent properties after all default values have been loaded. */
+    load_persistent_properties();
+}
+```
+
+加载完所有的属性文件之后,还要进行一个很重要的操作.前面我们提到过,属性可以作为触发条件对吧,那么既然现在我们已经加载了所有的属性,那么就可以看看这些属性是否可以触发某些动作了.
+
+init.c main函数中:
+```c
+    /* run all property triggers based on current state of the properties */
+    queue_builtin_action(queue_property_triggers_action, "queue_property_triggers");
+```
+与当初init.rc里记录的某action的触发条件匹配时，就把该action插入action_queue的尾部.
+
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/Android_property-1-1.png
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

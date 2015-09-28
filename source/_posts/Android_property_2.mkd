@@ -1,0 +1,483 @@
+---
+layout: post
+title: Android 5.1 property属性系统分析下篇
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2015-09-26 19:56:42
+---
+
+前面我们提到,当加载了所有的属性文件之后,会去检查属性作为触发条件的action,并把满足触发条件的action加入到action_queue链表中去.
+
+那么还有一种很常见的情况,就是Android系统运行的时候修改属性值,这样也可能导致某些action因为触发条件满足,而被触发.那么这些是如何检测的呢?
+
+还是看 init.c中的main函数
+
+<!--more-->
+
+```c
+for() {
+        int nr, i, timeout = -1;
+
+        execute_one_command();//执行action_queue链表中的action
+        restart_processes();//重启那些需要重启的service
+
+        if (!property_set_fd_init && get_property_set_fd() > 0) {//第一次执行for循环的时候,这个if的条件才满足
+ 
+           /*
+            初始化属性服务的时候调用property_service_init_action函数,它内部调用start_property_service创建socket
+            ,然后将socket描述符赋给property_set_fd
+            ,get_property_set_fd函数用来获取这个socket描述符
+            */
+            ufds[fd_count].fd = get_property_set_fd();
+
+            ufds[fd_count].events = POLLIN;
+            ufds[fd_count].revents = 0;
+            fd_count++;
+            property_set_fd_init = 1;//下次for循环,if条件就不满足了
+        }
+        if (!signal_fd_init && get_signal_fd() > 0) {//监听由init进程fork的子进程中哪些被杀死了
+            ufds[fd_count].fd = get_signal_fd();
+            ufds[fd_count].events = POLLIN;
+            ufds[fd_count].revents = 0;
+            fd_count++;
+            signal_fd_init = 1;
+        }
+        if (!keychord_fd_init && get_keychord_fd() > 0) {//组合按键
+            ufds[fd_count].fd = get_keychord_fd();
+            ufds[fd_count].events = POLLIN;
+            ufds[fd_count].revents = 0;
+            fd_count++;
+            keychord_fd_init = 1;
+        }
+
+............................
+for (i = 0; i < fd_count; i++) {
+            if (ufds[i].revents & POLLIN) {
+                if (ufds[i].fd == get_property_set_fd())//循环监听是否有向property socket发送请求
+                    handle_property_set_fd();
+                else if (ufds[i].fd == get_keychord_fd())//监听是否有组合按键按下
+                    handle_keychord();
+                else if (ufds[i].fd == get_signal_fd())//处理因子进程挂掉而发来的信号
+                    handle_signal();
+            }
+        }
+..................
+}
+```
+
+### 处理属性设置请求
+
+当捕获到设置属性的请求的时候,会调用handle_property_set_fd函数:
+
+```c
+void handle_property_set_fd()
+{
+    prop_msg msg;
+    . . . . . .
+    /*后面会利用poll机制,监听这个accept返回的描述符,一旦有数据可读,就会去读取数据到msg中*/
+    if ((s = accept(property_set_fd, (struct sockaddr *) &addr, &addr_size)) < 0) {
+        return;
+    }
+    . . . . . . 
+    switch(msg.cmd) {//msg是读取到的数据
+    case PROP_MSG_SETPROP:
+        /*
+            #define PROP_NAME_MAX   32
+            #define PROP_VALUE_MAX  92
+        说明设置属性时，属性名和属性值的长度都是有限制的
+        */
+        msg.name[PROP_NAME_MAX-1] = 0;
+        msg.value[PROP_VALUE_MAX-1] = 0;
+        . . . . . .
+        /*根据msg.name做不同的处理*/
+        if(memcmp(msg.name,"ctl.",4) == 0) {
+            . . . . . .
+        if (check_control_mac_perms(msg.value, source_ctx)) {
+                handle_control_message((char*) msg.name + 4, (char*) msg.value);
+            } else {
+                ERROR("sys_prop: Unable to %s service ctl [%s] uid:%d gid:%d pid:%d\n",
+                        msg.name + 4, msg.value, cr.uid, cr.gid, cr.pid);
+            }
+        } else {
+            if (check_perms(msg.name, cr.uid, cr.gid, source_ctx)) {
+                property_set((char*) msg.name, (char*) msg.value);
+            } else {
+                ERROR("sys_prop: permission denied uid:%d  name:%s\n",
+                      cr.uid, msg.name);
+            }
+            . . . . . .
+            close(s);
+        }
+        . . . . . .
+        break;
+    . . . . . .
+    }
+}
+```
+
+#### 处理ctr.
+
+对于普通属性而言，主要是调用property_set()来设置属性值，但是有一类特殊属性是以“ctl.”开头的，它们本质上是一些控制命令.例如属性“ ctrl.start ”和“ ctrl.stop  ”是用来启动和停止某个service.如用adb shell登录后，输入setprop ctl.start bootanim就可以查看开机动画了，如果要关闭就输入setprop ctr.stop bootanim就可以了。 这种控制命令需调用handle_control_message()来处理。
+
+当然，并不是随便谁都可以发出这种控制命令的，也就是说，不是谁都可以成功设置以“ctl.”开头的特殊属性。handle_property_set_fd()会先调用check_control_mac_perms()来检查发起方是否具有相应的权限。 
+
+```c
+static int check_control_mac_perms(const char *name, char *sctx)
+{
+    /*
+     *  Create a name prefix out of ctl.<service name>
+     *  The new prefix allows the use of the existing
+     *  property service backend labeling while avoiding
+     *  mislabels based on true property prefixes.
+     */
+    char ctl_name[PROP_VALUE_MAX+4];
+    int ret = snprintf(ctl_name, sizeof(ctl_name), "ctl.%s", name);
+
+    if (ret < 0 || (size_t) ret >= sizeof(ctl_name))
+        return 0;
+
+    return check_mac_perms(ctl_name, sctx);
+}
+```
+代码中的注释也已经很清楚了,就是吧属性值加一个 "ctl."的前缀,然后在调用check_mac_perms来真正检查权限:
+
+```c
+static int check_mac_perms(const char *name, char *sctx)
+{
+    if (is_selinux_enabled() <= 0)//如果没有开启SEAndroid,那么直接返回,也就是说不用检查权限了
+        return 1;
+
+    char *tctx = NULL;
+    const char *class = "property_service";
+    const char *perm = "set";
+    int result = 0;
+
+    if (!sctx)
+        goto err;
+
+    if (!sehandle_prop)
+        goto err;
+
+    if (selabel_lookup(sehandle_prop, &tctx, name, 1) != 0)
+        goto err;
+
+    if (selinux_check_access(sctx, tctx, class, perm, (void*) name) == 0)
+        result = 1;
+
+    freecon(tctx);
+ err:
+    return result;
+}
+```
+总的来说就是靠SEAndroid中的策略来判断是否有权限.这个和Android5.0之前的系统还是差别比较大的.想了解5.0之前的系统如何检查权限的,请阅读其源码吧.这里不在说了.针对SEAndroid,后续计划用好几篇文章来讲解.
+
+检查完权限后,要调用handle_control_message函数来处理了:
+
+```c
+
+void handle_control_message(const char *msg, const char *arg)
+{
+    if (!strcmp(msg,"start")) {
+        msg_start(arg);
+    } else if (!strcmp(msg,"stop")) {
+        msg_stop(arg);
+    } else if (!strcmp(msg,"restart")) {
+        msg_restart(arg);
+    } else {
+        ERROR("unknown control msg '%s'\n", msg);
+    }
+}
+```
+如果socket发来的命令是“ctl.start”，那么就会走到msg_start(arg):
+```c
+static void msg_start(const char *name)
+{
+    struct service *svc = NULL;
+    char *tmp = NULL;
+    char *args = NULL;
+
+    if (!strchr(name, ':'))
+        svc = service_find_by_name(name);在service_list链表中查找这个service
+    else {
+        tmp = strdup(name);
+        if (tmp) {
+            args = strchr(tmp, ':');
+            *args = '\0';
+            args++;
+
+            svc = service_find_by_name(tmp);
+        }
+    }
+
+    if (svc) {
+        service_start(svc, args);//如果找到这个service,就启动他
+    } else {
+        ERROR("no such service '%s'\n", name);
+    }
+    if (tmp)
+        free(tmp);
+}
+```
+ service_start()常常会fork一个子进程，然后为它设置环境变量（ANDROID_PROPERTY_WORKSPACE）.在init.c main函数中的for循环里面,重启service的时候,也是会调用这个函数的.
+
+```c
+void service_start(struct service *svc, const char *dynamic_args)
+{
+    . . . . . .
+    . . . . . .
+    pid = fork();
+ 
+    if (pid == 0) {
+        struct socketinfo *si;
+        struct svcenvinfo *ei;
+        char tmp[32];
+        int fd, sz;
+ 
+        umask(077);
+        if (properties_inited()) {
+            get_property_workspace(&fd, &sz);
+            sprintf(tmp, "%d,%d", dup(fd), sz);
+            add_environment("ANDROID_PROPERTY_WORKSPACE", tmp);
+        }
+ 
+        for (ei = svc->envvars; ei; ei = ei->next)
+            add_environment(ei->name, ei->value);
+    . . . . . .
+```
+其中 get_property_workspace() 的代码如下：
+
+```c
+void get_property_workspace(int *fd, int *sz)
+{
+    *fd = pa_workspace.fd;
+    *sz = pa_workspace.size;
+}
+```
+大家还记得前一篇文章介绍init_workspace()时，把打开的句柄记入pa_workspace.fd的句子吧，现在就是在用这个句柄。 这个句柄就是以可读方式打开/dev/__properties__,详情请看前一篇文章吧.
+
+ 一切准备好后，service_start()会在fork的子进程中调用execve()，执行svc->args[0]所指定的可执行文件，然后还要再写个属性值,表明处于runing状态.
+
+```c
+void service_start(struct service *svc, const char *dynamic_args)
+{
+    . . . . . .
+    . . . . . .
+    execve(svc->args[0], (char**) arg_ptrs, (char**) ENV);
+    . . . . . .
+    . . . . . .
+    svc->time_started = gettime();
+    svc->pid = pid;
+    svc->flags |= SVC_RUNNING;
+ 
+    if (properties_inited())
+        notify_service_state(svc->name, "running");
+}
+```
+其中的notify_service_state()的代码如下： 
+
+```c
+void notify_service_state(const char *name, const char *state)
+{
+    char pname[PROP_NAME_MAX];
+    int len = strlen(name);
+    if ((len + 10) > PROP_NAME_MAX)
+        return;
+    snprintf(pname, sizeof(pname), "init.svc.%s", name);
+    property_set(pname, state);
+}
+```
+很简单,就是设置init.svc.servicename  state,例如在 adb shell中:
+
+```bash
+root@generic_x86_64:/ # getprop |grep  init.                                   
+[init.svc.adbd]: [running]
+[init.svc.bootanim]: [stopped]
+[init.svc.debuggerd64]: [running]
+[init.svc.debuggerd]: [running]
+[init.svc.drm]: [running]
+[init.svc.fuse_sdcard]: [running]
+.................................
+```
+ 以上是handle_control_message()处理“ctl.start”命令时的情况，相应地还有处理“ctl.stop”命令的情况，此时会调用到msg_stop():
+
+```c
+static void msg_stop(const char *name)
+{
+    struct service *svc = service_find_by_name(name);//在 service_list中查找service
+
+    if (svc) {
+        service_stop(svc);//停止该service
+    } else {
+        ERROR("no such service '%s'\n", name);
+    }
+}
+```
+```c
+/* The how field should be either SVC_DISABLED, SVC_RESET, or SVC_RESTART */
+static void service_stop_or_reset(struct service *svc, int how)
+{
+    /* The service is still SVC_RUNNING until its process exits, but if it has
+     * already exited it shoudn't attempt a restart yet. */
+    svc->flags &= ~(SVC_RESTARTING | SVC_DISABLED_START);
+
+    if ((how != SVC_DISABLED) && (how != SVC_RESET) && (how != SVC_RESTART)) {
+        /* Hrm, an illegal flag.  Default to SVC_DISABLED */
+        how = SVC_DISABLED;
+    }
+        /* if the service has not yet started, prevent
+         * it from auto-starting with its class
+         */
+    if (how == SVC_RESET) {
+        svc->flags |= (svc->flags & SVC_RC_DISABLED) ? SVC_DISABLED : SVC_RESET;
+    } else {
+        svc->flags |= how;
+    }
+
+    if (svc->pid) {
+        NOTICE("service '%s' is being killed\n", svc->name);
+        kill(-svc->pid, SIGKILL);
+        notify_service_state(svc->name, "stopping");
+    } else {
+        notify_service_state(svc->name, "stopped");
+    }
+}
+```
+停止一个service时，主要是调用kill( )来杀死服务子进程，并将init.svc.xxx属性值设为stopping。
+
+
+#### 处理属性设置命令
+
+```c
+void handle_property_set_fd()
+{
+        . . . . . .
+        if(memcmp(msg.name,"ctl.",4) == 0) {
+            . . . . . .
+        } else {
+            if (check_perms(msg.name, cr.uid, cr.gid, source_ctx)) {
+                property_set((char*) msg.name, (char*) msg.value);
+            } else {
+                ERROR("sys_prop: permission denied uid:%d  name:%s\n",
+                      cr.uid, msg.name);
+            }
+            . . . . . .
+            close(s);
+        }
+        . . . . . .
+        break;
+    . . . . . .
+    }
+}
+```
+
+要设置普通属性，同样要检查权限:
+
+```c
+/*
+ * Checks permissions for setting system properties.
+ * Returns 1 if uid allowed, 0 otherwise.
+ */
+static int check_perms(const char *name, char *sctx)
+{
+    int i;
+    unsigned int app_id;
+
+    if(!strncmp(name, "ro.", 3))
+        name +=3;
+
+    return check_mac_perms(name, sctx);
+}
+```
+实际上还是通过调用check_mac_perms函数来检查权限,和前面ctl.一样.同样要注意和Android 5.0之前的系统的区别.
+
+权限检查通过之后，就可以真正设置属性了。前面我们已经说过，只有Property Service（即init进程）可以写入属性值，而普通进程最多只能通过socket向Property Service发出设置新属性值的请求，权限检查通过后,最终还得靠Property Service来写.
+
+```java
+
+int property_set(const char *name, const char *value)
+{
+    prop_info *pi;
+    int ret;
+
+    size_t namelen = strlen(name);
+    size_t valuelen = strlen(value);
+
+    /*判断属性名和属性值的合法性,其实就是判断长度了,前面也介绍了属性名和属性值的长度是有限制的*/
+    if (!is_legal_property_name(name, namelen)) return -1;
+    if (valuelen >= PROP_VALUE_MAX) return -1;
+
+    /*查找要设置的属性,在共享内存中是否已经存在*/
+    pi = (prop_info*) __system_property_find(name);
+
+    /*存在的话,检查是否是以ro.开头的,是的话,返回错误,因为ro.是只读属性,不能被改写的*/
+    if(pi != 0) {
+        /* ro.* properties may NEVER be modified once set */
+        if(!strncmp(name, "ro.", 3)) return -1;
+
+        __system_property_update(pi, value, valuelen);
+    } else {
+    /*不存在,那么就把新的属性和他的值写入共享内存*/
+        ret = __system_property_add(name, namelen, value, valuelen);
+        if (ret < 0) {
+            ERROR("Failed to set '%s'='%s'\n", name, value);
+            return ret;
+        }
+    }
+    /* If name starts with "net." treat as a DNS property. */
+    /*如果设置的是net.change,那么直接返回,因为net.change的值是由系统来设置的*/
+    if (strncmp("net.", name, strlen("net.")) == 0)  {
+        if (strcmp("net.change", name) == 0) {
+            return 0;
+        }
+       /*
+        * The 'net.change' property is a special property used track when any
+        * 'net.*' property name is updated. It is _ONLY_ updated here. Its value
+        * contains the last updated 'net.*' property.
+        */
+         /*如果设置的是net.开头的属性的话,还要把net.change的值设置为刚刚设置的属性名字*/
+        property_set("net.change", name);
+    } else if (persistent_properties_loaded &&
+            strncmp("persist.", name, strlen("persist.")) == 0) {
+        /*
+         * Don't write properties to disk until after we have read all default properties
+         * to prevent them from being overwritten by default values.
+         */
+    /*如果要设置persist属性的话，只有在系统将所有的默认persist属性都加载完毕后，才能设置成功。
+    persist属性应该是那种会存入可持久化文件的属性，
+    这样，系统在下次启动后，可以将该属性的初始值设置为系统上次关闭时的值*/
+        write_persistent_property(name, value);
+    } else if (strcmp("selinux.reload_policy", name) == 0 &&
+               strcmp("1", value) == 0) {
+        /*   如果将“selinux.reload_policy”属性设为“1”了，那么要重新加载SEAndroid策略。*/
+        selinux_reload_policy();
+    }
+    /*因为属性值发生了改变,所以要遍历action_list检查下是否满足了触发action的触发条件。*/
+    property_changed(name, value);
+    return 0;
+}
+```
+
+将满足触发条件的action,添加到action_queue链表中去,然后在init.c main函数中的for循环中,就会被执行了.
+```c
+void property_changed(const char *name, const char *value)
+{
+    if (property_triggers_enabled)
+        queue_property_triggers(name, value);
+}
+```
+
+```c
+static int queue_property_triggers_action(int nargs, char **args)
+{
+    queue_all_property_triggers();
+    /* enable property triggers */
+    property_triggers_enabled = 1;
+    return 0;
+}
+```
+
+
+### 总结
+
+Android 5.0属性的设置相较于之前的Android系统,主要变化是在权限检查这块,其他变化到不大.一般情况下,只要添加或者修改了某个属性的值(ctl.类的属性例外),都会遍历action_list链表,看看是否会触发某些action. property service服务,其实就是init进程本身了.
+
