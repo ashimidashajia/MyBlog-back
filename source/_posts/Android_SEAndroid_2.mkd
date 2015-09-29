@@ -111,7 +111,7 @@ type rootfs, fs_type;
 
 ### Object Class 和 permissive
 
-#### permission
+#### permissive
 
 在早起Android版本源码中你可能会看到某些类型定义的时候,下面紧跟着permissive:
 ```bash
@@ -122,8 +122,38 @@ permissive adbd;
 
 #### object class
 
+客体分了很多种类,比如文件,文件夹,连接文件,驱动设备文件等等.
+
+Android源码/external/sepolicy/security_classes:
+
+```bash
+class security
+class process
+class system
+class capability
+
+# file-related classes
+class filesystem
+class file
+class dir
+class fd
+class lnk_file
+class chr_file
+class blk_file
+class sock_file
+class fifo_file
+
+. . . . .
+```
+security_classes文件中记录了当前SEAndroid所有的obejct class.
+
+与security_classes文件相对应的是下面的文件,其中记录做object class 所具备的相关permissions权限.
+
+Android源码/external/sepolicy/access_vectors
 
 
+
+Object classes 和他们分配的 permissions是由kernel内部LSM中的object manager来决定的,所以在不修改内核LSM模块源码的情况下,不要尝试修改上面的两个文件中的内容.
 
 ### 主体对客体的访问规则
 
