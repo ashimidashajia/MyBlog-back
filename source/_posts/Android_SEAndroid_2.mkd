@@ -149,9 +149,36 @@ security_classes文件中记录了当前SEAndroid所有的obejct class.
 
 与security_classes文件相对应的是下面的文件,其中记录做object class 所具备的相关permissions权限.
 
-Android源码/external/sepolicy/access_vectors
+Android源码/external/sepolicy/access_vectors:
 
+```bash
+#
+# Define a common prefix for file access vectors.
+#
 
+common file
+{
+    ioctl
+    read
+    write
+    create
+    getattr
+    setattr
+    lock
+    relabelfrom
+    relabelto
+    append
+    unlink
+    link
+    rename
+    execute
+    swapon
+    quotaon
+    mounton
+}
+. . . . .
+```
+只要是security_classes文件中有的object class,都会在access_vectors有其对应的操作许可,即可以执行哪些操作.
 
 Object classes 和他们分配的 permissions是由kernel内部LSM中的object manager来决定的,所以在不修改内核LSM模块源码的情况下,不要尝试修改上面的两个文件中的内容.
 
@@ -159,14 +186,71 @@ Object classes 和他们分配的 permissions是由kernel内部LSM中的object m
 
 除了定义主体和客体的安全上下文外,还需要定义主体对客体的访问规则,这也是所有策略文件中,数量最大的部分.
 
+定义访问规则,使用allow语句,其语法如下所示:
 
+![][3]
 
+这里说明一个隐含规则,有时候把主体进程用doamin标示,而type仅仅标示客体.
+
+这里列举一个例子来解释上述语法中各个字段的含义.
+
+Android源码/external/sepolicy/adbd.te
+
+```bash
+allow adbd adb_device:chr_file rw_file_perms;
+```
+1. 其中adbd是一个关联了domain属性的名为adbd的主体type.主体是访问的发起者.
+
+2. adb_device是客体type,也就是主体要访问的资源.
+
+Android源码/external/sepolicy/device.te
+
+```bash
+type adb_device, dev_type;
+```
+可知adb_device关联了dev_type属性.
+
+Android源码/external/sepolicy/attributes
+
+```bash
+# All types used for devices.
+attribute dev_type;
+```
+3. chr_file指的是客体所属的类型class object.知道了所属类型后,那么就可以根据前面的介绍,从access_vectors得知相关的许可操作了.
+
+4. 有时候只是想要object class默认的许可中的某些许可,rw_file_perms就是这个作用,只是想要chr_file中众多许可中与可读可写相关的许可.
+
+```bash
+class chr_file
+inherits file
+{
+    execute_no_trans
+    entrypoint
+    execmod
+    open
+    audit_access
+}
+```
+
+说明chr_file继承自file,也就是说file所具有的许可,他都继承了.
+
+rw_file_perms实际上是个宏,定义在global_macros中:
+
+```bash
+define(`rw_file_perms', `{ r_file_perms w_file_perms }')
+define(`r_file_perms', `{ getattr open read ioctl lock }')
+define(`w_file_perms', `{ open append write }')
+```
+
+<font color="#ff5588">总的来说上面那个allow规则的含义是:允许安全上下文中type字段是adbd的主体访问安全上下文中type字段是adb_device的客体资源,对这些资源拥有读写权限.</font>
+
+另外要注意的是客体也有可能是某个进程,主体也可能是某一文件,这些情况,不太多见,但也要知道.
 
 
 
 [1]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-seandroid-1-7.png
 [2]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-seandroid-2-2.png
-
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/Android_SEandroid-2-3.PNG
 
 
 
