@@ -1,0 +1,160 @@
+---
+layout: post
+title: Android 5.1 SEAndroid分析之安全上下文语法篇
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2015-09-29 14:02:40
+---
+
+前面文章最后介绍了如何查看安全上下文.现在介绍下安全上下文的含义和规则.
+
+上下文是一个有固定格式的字符串:
+
+```bash
+username:role:type:an optional MLS security range
+```
+如u:object_r:rootfs:s0就是一个安全上下文.在SEAndroid中最重要的是type字段的值,username和MLS字段通常都为u和s0.role也就两个角色罢了.所以说SEAndroid是基于类型控制的MAC机制.意味着SEAndroid的策略文件相比较SELinux来说,是比较简单的.
+
+与SEAndroid相关的核心源码在
+
+```bash
+Android源码/external/sepolicy 里面是Android系统默认的策略文件,厂商可以在device目录中添加和覆盖策略文件
+Android源码/external/libselinux 里面是SEAndroid核心库
+```
+<!--more-->
+
+### role角色
+
+为了实现基于角色的访问控制,user可以被分配一个或者多个角色,不同的角色有不同的权限,每个角色可以被分配若干domain types.
+
+Android源码/external/sepolicy/roles:
+
+```bash
+role r;
+role r types domain;  
+```
+
+roles文件记录了当前系统定义了哪些角色,可见Android 5.1中仍然只是添加了一个角色r,r角色和domain属性关联,domain属性代表主体进程.
+
+当执行
+```bash
+ps -Z
+```
+结果如下:
+
+![][1]
+
+这也验证了角色r适合进程相关联的了.
+
+
+除了角色r外,SElinux还有一个内置的角色object_r,这个角色是和资源关联的.
+
+当执行
+```bash
+ll -Z
+```
+结果如下
+
+![][2]
+
+也验证了object_r角色是和资源,也就是客体相关联的了.
+
+基于角色的访问控制在SEAndroid中不是重头戏.
+
+#### Type类型
+
+定义主体和客体所属的类型.
+
+基本语法:
+
+```bash
+type 类型名称 [,属性]
+```
+提到type,就不得不提属性了:
+
+Android源码/external/sepolicy/attributes
+
+```bash
+######################################
+# Attribute declarations
+#
+
+# All types used for devices.
+attribute dev_type;
+
+# All types used for processes.
+attribute domain;
+
+# All types used for filesystems.
+attribute fs_type;
+
+# All types used for context= mounts.
+attribute contextmount_type;
+
+. . . . . 
+```
+上述文件中定义了SEAndroid中用到的所有属性,看到了吧,domain也是在这里定义的,而且注释也说的很清楚了,是用于进程的.fs_type表示文件,通常用于表示客体的类型,
+
+例如
+
+```bash
+type adbd, domain;
+```
+定义了adbd类型,隶属于domain.
+
+```bash
+type rootfs, fs_type;
+```
+定义rootfs类型,隶属于fs_type.
+
+
+
+### Object Class 和 permissive
+
+#### permission
+
+在早起Android版本源码中你可能会看到某些类型定义的时候,下面紧跟着permissive:
+```bash
+type adbd, domain;
+permissive adbd;
+```
+意味着此时adbd运行在 permissive状态.就算是Android系统本身工作在enforcing状态,adbd违反了策略文件中定义的访问规则,照样可以执行.
+
+#### object class
+
+
+
+
+### 主体对客体的访问规则
+
+除了定义主体和客体的安全上下文外,还需要定义主体对客体的访问规则,这也是所有策略文件中,数量最大的部分.
+
+
+
+
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-seandroid-1-7.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-seandroid-2-2.png
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

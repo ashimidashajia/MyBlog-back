@@ -151,7 +151,7 @@ shell@shamu:/ $
 . . . . . 
 CapInh: 0000000000000000
 CapPrm: 0000000000000000
-CapEff: 0000000000000000
+CapEff: 0000000000000000d
 CapBnd: 00000000000000c0
 . . . . . 
 ```
@@ -175,16 +175,95 @@ CapBnd很重要,表示边界能力.上面shell进程CapBnd的能力位图为c0,�
 
 ### SEAndroid的引入
 
-DAC太过宽松了，所以各路高手想方设法都要在Android系统上搞到root权限。那么SELinux如何解决这个问题呢？原来，它在DAC之外，设计了一个新的安全模型，叫MAC（Mandatory Access Control），翻译为强制访问控制。MAC的处世哲学非常简单：即任何进程想在SELinux系统中干任何事情，都必须先在安全策略配置文件中赋予权限。凡是没有出现在安全策略配置文件中的权限，进程就没有该权限.
+DAC太过宽松了，那么SELinux如何解决这个问题呢？原来，它在DAC之外，设计了一个新的安全模型，叫MAC（Mandatory Access Control），翻译为强制访问控制。MAC的处世哲学非常简单：即任何进程想在SELinux系统中干任何事情，都必须先在安全策略配置文件中赋予权限。凡是没有出现在安全策略配置文件中的权限，进程就没有该权限.
 
+如下图所示:
+![][3]
+
+Subject:主体,通常指的是可执行程序.
+
+Object: 客体,通常指某种资源,如文件,硬件等.
+
+用规则来描述主体是否对客体有某种操作权限.
+
+例如，我们可以设定这样的一个管理策略，不允许用户A将它创建的文件F授予用户B访问。这样无论用户A如何修改文件F的权限位，用户B都是无法访问文件F的。这种安全访问模型可以强有力地保护系统的安全。
+
+#### SELinux架构
+
+SEAndroid可以理解为是SELinux的精简版,更适合移动设备.所以有必要介绍下SELinux的架构.
+
+Linux内核中有一个Linux Security Modules,简称LSM框架,允许第三方权限访问机制挂接到内核中来.很类似于linux驱动模型,框架什么的都有了,只要你按照这个框架写的东西,都可以挂接到内核中去.SElinux就是由美国NSA按照linux内核安全模型框架编写的基于MAC访问控制的模块.
+
+可以将LSM框架简单的理解为一系列的Hook方法,这些方法会在访问资源的时候被调用,用来简称是否有权限.
+
+下图所示中间部分,即为LSM模块.
+
+![][4]
+
+当某一进程主体发起对某一个文件客体写操作的时候,LSM模块Hook到了此次请求,LSM内部的Object Manager首先在 权限访问缓存中查找是否有对应的规则,如果没有的话,Security server就会去查询安全策略中是否有该规则.如果没有的话,就拒绝此次操作;有的话,就将查询到的规则放到访问向量缓存中去,然后向Object Manager报告,允许此次操作,那么最后进程主体就可以对客体文件进行写操作了.
+
+DAC机制和MAC机制可以并存,执行的时候先检查DAC是否满足,如果不满足,那就不需要进行MAC检查了.只有当满足DAC之后,才会进行MAC检查.
+
+SELinux的三种状态:
+
+Disable: 关闭
+
+Permissive: 宽松状态,违反策略,紧紧是提示而已,操作仍能进行
+
+Enforcing: 执行状态,违反策略,操作会被拒绝执行.
+
+
+adb shell进入android 设备终端,执行如下命令,可以查看当前状态:
+
+```bash
+shell@shamu:/ $ getenforce                                                     
+Enforcing
+```
+
+可以使用 setenforce命令,在Permission和Enforcing状态切换,如果是Disable的话,不能切换状态.
+
+```bash
+# getenforce
+Enforcing
+# setenforce 0
+# getenforce
+Permissive
+# setenforce 1
+# getenforce
+Enforcing
+
+```
+
+Android 4.2之前的系统都是Disable.
+
+Android 4.3: Permissive.
+
+– With all domains permissive + unconfined.
+
+Android 4.4: Enforcing.
+
+– Enforcing for installd, netd, vold, and zygote.
+– Permissive for app domains (logging denials).
+– Permissive + unconfined for all other domains.
+
+Android 5.0: Enforcing.从此版本开始,有了较完备的支持.
+
+
+#### 查看SELinux 安全上下文
+
+在相关命令前,加-Z即可查看SElinux 安全上下文,如下图所示
+
+![][5]
+
+![][6]
 
 
 [1]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-seandroid-1-1.png
 [2]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-seandroid-1-2.png
-
-
-
-
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-seandroid-1-3.png
+[4]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-seandroid-1-4.png
+[5]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-seandroid-1-5.png
+[6]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-seandroid-1-6.png
 
 
 
