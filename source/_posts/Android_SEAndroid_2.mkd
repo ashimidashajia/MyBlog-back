@@ -93,7 +93,7 @@ attribute contextmount_type;
 
 . . . . . 
 ```
-上述文件中定义了SEAndroid中用到的所有属性,看到了吧,domain也是在这里定义的,而且注释也说的很清楚了,是用于进程的.fs_type表示文件,通常用于表示客体的类型,
+上述文件中定义了SEAndroid中用到的所有属性,属性由attribute关键字声明，属性其实是一个特殊的type，可以把属性看成是type的集合，为属性设置的策略，适用于所有与该属性相关联的type.看到了吧,domain也是在这里定义的,而且注释也说的很清楚了,是用于进程的.fs_type表示文件,通常用于表示客体的类型,
 
 例如
 
@@ -107,7 +107,31 @@ type rootfs, fs_type;
 ```
 定义rootfs类型,隶属于fs_type.
 
+注意：一个type可以关联多个attribute；
 
+<font color="#ff5588">attribute和type的关系</font>
+
+a）实际上，type和attribute位于同一个命名空间，即不能用type命令和attribute命令定义相同名字的东西；
+
+b）其实，attribute真正的意思应该是类似typegroup这样的概念。比如将type A和attributeB关联起来，就是说type A属于attributeB中的一员；
+
+使用attribute有什么好处呢？一般而言，系统会定义数十或数百个type，每个type都需要通过allow语句来设置相应的权限，这样我们的安全策略文件编写起来就会非常麻烦。有了attribute之后呢，我们可以将这些type与某个attribute关联起来，把这些type共有的权限，通过一条allow语句来设置.
+
+```bash
+ # 定义两个type，分别是t_a和t_b，它们都需要设置对t_c类型文件的读操作；
+
+  # 首先，把t_a和t_b关联到attr_test
+
+  type t_a, attr_test;
+
+  type t_b, attr_test;
+
+  # 通过一条allow语句为attr_test设置对t_c类型文件的读权限
+
+  allow attr_test t_c:file read;
+
+```
+现在t_a和t_b域的进程拥有了对t_c类型文件的读权限.
 
 ### Object Class 和 permissive
 

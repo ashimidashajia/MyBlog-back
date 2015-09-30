@@ -1,0 +1,20 @@
+---
+layout: post
+title: Android 5.1 SEAndroid分析之打表签
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2015-09-30 22:46:37
+---
+
+现在已经对SEAndroid上下文以及它的语法有了简单了解了,但是这些上下文如何使用呢?也就是说如何将这些上下文和主体客体绑定呢?接下来就来分析这个问题.
+
+给主体客体绑定SEAndroid上下文,可以称为打标签.
+
+<!--more-->
+
+### SEAndroid 初始化
+
+SEAndroid的初始化,肯定是在init进程中完成的了.
+
+
+http://blog.csdn.net/modianwutong/article/details/43114883
