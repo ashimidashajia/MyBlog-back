@@ -1,0 +1,95 @@
+---
+layout: post
+title: Android 5.1 SEAndroid分析之type转换篇
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2015-09-30 15:48:31
+---
+
+type转换分两种情况,一种是进程主体type转换,另一种是资源客体type转换.
+
+转换指的是什么意思呢?
+
+<!--more-->
+
+init进程上下文如下所示:
+
+```bash
+root@shamu:/ # ps  -Z | grep init
+u:r:init:s0                    root      1     0     /init
+```
+init是kernel启动后运行的第一个进程,会fork出很多其他进程.那么这些fork出的进程的安全上下文是什么呢? 总不能和init一样吧.
+
+在SEAndroid中,上述问题就被称为Domain Transition(前面文章中已经说过了,通常domain指process的类型,而type指资源的类型),简称DT,即某个进程的Domain切换到一个更合适的Domain中去。
+
+除了DT外，还有针对Type的Transition（简称TT）。举个例子，假设目录A的SContext为u:r:dir_a，那么默认情况下，在该目录下创建的文件的SContext就是u:r:dir_a，如果想让它的SContext发生变化，那么就需要TypeTransition。
+
+
+### DT转换
+
+转换用到的关键字是:type_transition.其完整格式:
+
+```bash
+  type_transition  source_type  target_type : class  default_type
+```
+表示source_type域的进程在对target_type类型的资源进行object class定义的许可操作时，进程会切换到default_type域中.
+
+例如:
+
+```bash
+type_transition init shell_exec:process init_shell
+```
+当init域的进程执行（process）shell_exec类型的可执行文件时，进程会从init域切换到init_shell域.
+
+但是上述策略要想被执行的话,至少还有三个前提:
+
+1. 首先，你得让init域的进程要能够执行shell_exec类型的文件
+
+```bash
+ allow init shell_exec:file execute;
+```
+2.告诉SELinux，允许init域的进程切换到init_shell域
+
+```bash
+ allow init init_shell:process transition;
+```
+
+3.告诉SELinux，域切换的入口（entrypoint）是执行shell_exec类型的文件
+
+```bash
+ allow init_shell shell_exec:file entrypoint;
+```
+
+这样看来转换需要的步骤还挺多的,好在SEAndroid定义了一个宏,可以一次性做完上面的四步操作.
+
+
+Android源码/external/sepolicy/te_macros
+
+![][1]
+
+
+这两个宏的区别,注释说的很清楚了.domain_trans相当于前面我们说的三个前提,此时紧紧是有转换的能力而已.domain_auto_trans才是我们在策略文件中要使用的宏,只是在domain_trans基础上,添加了转换规则而已.
+
+
+使用宏之后的写法:
+```bash
+domain_auto_trans(init, shell_exec, init_shell)
+```
+
+
+### TT转换
+
+TT的关键字也是type_transition，而且要顺利完成Transition,也需要申请相关权限.直接看te_macros中的宏定义吧.
+
+![][2]
+
+
+该宏的意思就是当domain域的进程在dir_type类型的目录创建文件时，该文件的SContext应该是file_type类型.
+
+
+te_macros中的宏很重要,也不多,很值得花时间挨个看看,在看策略文件的时候,会经常看到使用这些宏.
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-seandroid-3-1.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-seandroid-3-2.png
+
+

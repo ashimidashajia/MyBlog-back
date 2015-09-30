@@ -247,6 +247,15 @@ define(`w_file_perms', `{ open append write }')
 另外要注意的是客体也有可能是某个进程,主体也可能是某一文件,这些情况,不太多见,但也要知道.
 
 
+####其他规则
+
+dontaudit: 表示不记录某条违反规则的决策信息
+
+auditallow: 默认情况下是SELinux只记录那些权限检查失败的操作。allowaudit则使得权限检查成功的操作也被记录。注意，allowaudit只是允许记录，它和赋予权限没关系。赋予权限必须且只能使用allow语句。
+
+neverallow: 表示不允许主体对客体执行指定的操作.
+
+
 
 [1]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-seandroid-1-7.png
 [2]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-seandroid-2-2.png
