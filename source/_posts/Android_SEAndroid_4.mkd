@@ -1,15 +1,12 @@
 ---
 layout: post
-title: Android 5.1 SEAndroid分析之打标签
+title: Android 5.1 SEAndroid分析之加载策略文件
 categories: Android底层开发
 tags: [Android核心服务]
 date: 2015-09-30 22:46:37
 ---
-
-现在已经对SEAndroid上下文以及它的语法有了简单了解了,但是这些上下文如何使用呢?也就是说如何将这些上下文和主体客体绑定呢?接下来就来分析这个问题.
-
-给主体客体绑定SEAndroid上下文,可以称为打标签.
-
+  
+SEAndroid的初始化,自然是在init进程中完成的了,主要是想内核模块加载策略文件和给主体客体打标签.这篇文章主要介绍策略加载相关的部分.
 <!--more-->
 
 ### SEAndroid 初始化
@@ -256,7 +253,7 @@ int security_load_policy(void *data, size_t len)
 
 在Android5.0(包括5.0)之前是首先尝试加载/data/security/current/sepolicy,加载不成功才会,才会尝试加载/sepolicy.
 
-而Android5.1中初始化的时候是只加载/sepolicy这个策略文件.但是
+而Android5.1中初始化的时候是只加载/sepolicy这个策略文件.但是提供了如下函数:
 
 
 ```c
@@ -269,12 +266,80 @@ bool selinux_android_use_data_policy(void)
 ```
 
 ```c
+#define POLICY_OVERRIDE_VERSION    "/data/security/current/selinux_version"/data/security/current/selinux_version"
+#define POLICY_BASE_VERSION        "/selinux_version"
+static int policy_index = 0;
 
+static void set_policy_index(void)
+{
+    . . . 
+    /*打开/data/security/current/selinux_version"*/
+    fd_base = open(POLICY_BASE_VERSION, O_RDONLY | O_NOFOLLOW);
+    . . .
+    /*打开/selinux_version*/
+    fd_override = open(POLICY_OVERRIDE_VERSION, O_RDONLY | O_NOFOLLOW);
+    . . .
+    map_base = mmap(NULL, sb_base.st_size, PROT_READ, MAP_PRIVATE, fd_base, 0);
+    . . .
+    map_override = mmap(NULL, sb_override.st_size, PROT_READ, MAP_PRIVATE, fd_override, 0);
+    . . .
+    /*就是比较selinux版本是否一致,一致的话,就将policy_index设置为1*/
+    if (memcmp(map_base, map_override, sb_base.st_size) == 0)
+        policy_index = 1;
+    . . . 
+
+}
+```
+利用上述函数可以将策略文件由根目录下的/sepolicy切换到/data/security/current/sepolicy.
+
+利用下面的函数可可以装载data下的策略文件到内核中去:
+```c
+int selinux_android_reload_policy(void)
+{
+    return selinux_android_load_policy_helper(true);
+}
 ```
 
+这个函数被init.c中的下列函数调用:
 
+```c
+int selinux_reload_policy(void)
+{
+    if (selinux_is_disabled()) {
+        return -1;
+    }
 
+    INFO("SELinux: Attempting to reload policy files\n");
 
+    if (selinux_android_reload_policy() == -1) {//装载data下的策略文件到内核
+        return -1;
+    }
+
+    if (sehandle)
+        selabel_close(sehandle);
+
+    if (sehandle_prop)
+        selabel_close(sehandle_prop);
+
+    selinux_init_all_handles();//重新装载文件和属性的安全上下文
+    return 0;
+}
+```
+当设置selinux.reload_policy属性值为1的时候,就会触发selinux_reload_policy函数执行:
+
+```c
+int property_set(const char *name, const char *value)
+{
+   . . . .. .
+    } else if (strcmp("selinux.reload_policy", name) == 0 &&
+               strcmp("1", value) == 0) {
+        selinux_reload_policy();
+    }
+    property_changed(name, value);
+    return 0;
+}
+```
+<font color="#ff5588">可以得出结论:Android5.1中init进程最先开始加载的是根目录下的策略文件,当设置selinux.reload_policy属性值为1的时候,会加载/data/security/current/下的策略文件替换之前的策略.我们自定义的策略就是在/data/security/current/中.</font>
 
 
 
@@ -284,4 +349,3 @@ bool selinux_android_use_data_policy(void)
 
 
 
-http://blog.csdn.net/modianwutong/article/details/43114883

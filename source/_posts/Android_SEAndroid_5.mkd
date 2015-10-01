@@ -1,0 +1,344 @@
+---
+layout: post
+title: Android 5.1 SEAndroid分析之打标签
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2015-10-01 23:21:29
+---
+
+现在已经对SEAndroid上下文以及它的语法有了简单了解了,而且也已经清楚了如何向内核模块加载策略文件,但是这些安全上下文如何使用呢?也就是说如何将这些上下文和主体客体绑定呢?接下来就来分析这个问题.
+
+给主体客体绑定SEAndroid上下文,可以称为打标签.
+
+<!--more-->
+
+### SEAndroid 对rc文件的扩展
+
+SEAndroid对rc文件的影响,主要体现在增加了五个关键字:
+
+#### seclable
+
+用来设置service的安全上下文
+```bash
+service ueventd /sbin/ueventd
+    class core
+    critical
+    seclabel u:r:ueventd:s0
+```
+
+#### restorecon
+
+恢复某个文件和文件夹安全上下文到最初设置的状态
+
+```bash
+on post-fs-data
+    # We chown/chmod /data again so because mount is run as root + defaults
+    chown system system /data
+    chmod 0771 /data
+    # We restorecon /data in case the userdata partition has been reset.
+    restorecon /data
+```
+
+#### setcon
+
+只用来设置init进程的安全上下文
+```bash
+on early-init
+. . . . 
+setcon u:r:init:s0
+. . . .
+```
+
+#### setenforce
+
+设置为enforcing模式
+
+
+#### setsebool
+
+设置一个policy boolean类型的值
+
+
+后面连个在rc文件中不多见.
+
+### init进程初始化安全上下文
+
+init.c中main函数中的selinux_initialize函数调用selinux_init_all_handles()函数来装载文件和属性的安全上下文.
+
+
+```c
+struct selabel_handle *sehandle;
+struct selabel_handle *sehandle_prop;
+
+void selinux_init_all_handles(void)
+{
+    sehandle = selinux_android_file_context_handle();//装载所有文件的安全上下文
+    selinux_android_set_sehandle(sehandle);//libselinux中也有一个sehandle,此函数就是给这个全局变量赋值
+    sehandle_prop = selinux_android_prop_context_handle();//装载所有属性文件的安全上下文
+}
+
+```
+Android源码/external/libselinux/src/label_internal.h
+```c
+struct selabel_handle {
+    /* arguments that were passed to selabel_open */
+    unsigned int backend;
+    int validating;
+
+    /* labeling operations */
+    struct selabel_lookup_rec *(*func_lookup) (struct selabel_handle *h,
+                           const char *key, int type);
+    void (*func_close) (struct selabel_handle *h);
+    void (*func_stats) (struct selabel_handle *h);
+    bool (*func_partial_match) (struct selabel_handle *h, const char *key);
+    struct selabel_lookup_rec *(*func_lookup_best_match) (struct selabel_handle *h,
+                             const char *key,
+                             const char **aliases,
+                             int type);
+
+    /* supports backend-specific state information */
+    void *data;
+
+    /* substitution support */
+    struct selabel_sub *subs;
+};
+```
+
+
+#### 文件打标签
+
+与文件打标签相关的函数如下所示:
+```c
+struct selabel_handle* selinux_android_file_context_handle(void)
+{
+    return file_context_open();
+}
+
+```
+文件的安全上下文记录在file_contexts中,该文件在手机中有以下两个位置:
+```c
+static const struct selinux_opt seopts[] = {
+    { SELABEL_OPT_PATH, "/file_contexts" },
+    { SELABEL_OPT_PATH, "/data/security/current/file_contexts" },
+    { 0, NULL } };
+
+static struct selabel_handle *file_context_open(void)
+{
+    struct selabel_handle *h;
+
+    h = get_selabel_handle(seopts);//sepots是一个全局变量,定义如上所示
+
+    if (!h)
+        selinux_log(SELINUX_ERROR, "%s: Error getting file context handle (%s)\n",
+                __FUNCTION__, strerror(errno));
+    return h;
+}
+```
+
+通过下面的函数,选择一个file_contexts文件,并加载,这样就初始化好了文件的安全上下文.
+
+```c
+static struct selabel_handle *get_selabel_handle(const struct selinux_opt opts[])
+{
+   . . .  
+    set_policy_index();//该函数上一篇文章已经介绍了,用来设置数组索引的,即选择seopts[]数组中的哪一个元素
+   . . .
+    h = selabel_open(SELABEL_CTX_FILE, &opts[policy_index], 1);
+    . . .
+    fd = open(opts[policy_index].value, O_RDONLY | O_NOFOLLOW);
+  . . . 
+    map = mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+   . . .  
+    SHA_hash(map, sb.st_size, fc_digest);
+    . . .
+}
+```
+Android源码/external/sepolicy/file_contexts:
+
+```bash
+/           u:object_r:rootfs:s0
+
+# Data files
+/adb_keys       u:object_r:adb_keys_file:s0
+/default\.prop      u:object_r:rootfs:s0
+/fstab\..*      u:object_r:rootfs:s0
+/init\..*       u:object_r:rootfs:s0
+/res(/.*)?      u:object_r:rootfs:s0
+/ueventd\..*        u:object_r:rootfs:s0
+
+# Executables
+/charger        u:object_r:rootfs:s0
+/init           u:object_r:rootfs:s0
+/sbin(/.*)?     u:object_r:rootfs:s0
+
+# Empty directories
+/lost\+found        u:object_r:rootfs:s0
+/proc           u:object_r:rootfs:s0
+
+# SELinux policy files
+/file_contexts      u:object_r:rootfs:s0
+/property_contexts  u:object_r:rootfs:s0
+/seapp_contexts     u:object_r:rootfs:s0
+/sepolicy       u:object_r:rootfs:s0
+
+. . .
+##########################
+# Devices
+#
+/dev(/.*)?      u:object_r:device:s0
+/dev/akm8973.*      u:object_r:sensors_device:s0
+
+. . .
+#############################
+# System files
+#
+/system(/.*)?       u:object_r:system_file:s0
+/system/bin/sh      --  u:object_r:shell_exec:s0
+
+. . .
+
+#############################
+# Vendor files
+#
+/vendor(/.*)?       u:object_r:system_file:s0
+/vendor/bin/gpsd    u:object_r:gpsd_exec:s0
+#############################
+# Data files
+#
+/data(/.*)?     u:object_r:system_data_file:s0
+/data/.layout_version       u:object_r:install_data_file:s0
+
+. . . 
+
+# coredump directory for userdebug/eng devices
+/cores(/.*)?                    u:object_r:coredump_file:s0
+
+# Wallpaper file for other users
+/data/system/users/[0-9]+/wallpaper     u:object_r:wallpaper_file:s0
+#############################
+# efs files
+#
+/efs(/.*)?      u:object_r:efs_file:s0
+#############################
+# Cache files
+#
+/cache(/.*)?        u:object_r:cache_file:s0
+
+. . .
+
+#############################
+# sysfs files
+#
+/sys/devices/platform/nfc-power/nfc_power -- u:object_r:sysfs_nfc_power_writable:s0
+/sys/devices/system/cpu(/.*)?    u:object_r:sysfs_devices_system_cpu:s0
+
+. . . 
+
+#############################
+# asec containers
+/mnt/asec(/.*)?             u:object_r:asec_apk_file:s0
+/mnt/asec/[^/]+/[^/]+\.zip  u:object_r:asec_public_file:s0
+/mnt/asec/[^/]+/lib(/.*)?   u:object_r:asec_public_file:s0
+/data/app-asec(/.*)?        u:object_r:asec_image_file:s0
+```
+
+可以看到file_contexts中记录的就是android 系统中各个目录以及文件的安全上下文.
+
+现在有个问题,就是加载file_contexts的时候,可能一些文件系统还没挂载呢,这时候需要利用restorecon函数将这些文件夹恢复到file_contexts中标记的安全上下文.
+
+init.c中main函数:
+
+```c
+ selinux_initialize();
+    /* These directories were necessarily created before initial policy load
+     * and therefore need their security context restored to the proper value.
+     * This must happen before /dev is populated by ueventd.
+     */
+    restorecon("/dev");
+    restorecon("/dev/socket");
+    restorecon("/dev/__properties__");
+    restorecon_recursive("/sys");
+```
+
+上述是针对文件和文件夹设置安全上下文,还有一种情况就是针对文件系统设置标签,也就是设置安全上下文.
+
+Android源码/external/sepolicy/中有两个文件
+```bash
+genfs_contexts
+fs_use
+```
+是用来给文件系统设置安全上下文的,设置之后文件系统内的所有文件没有重新指定的话,都是这个安全上下文.
+
+genfs_contexts主要是针对基于内存的文件系统打标签:
+```bash
+# Label inodes with the fs label.
+genfscon rootfs / u:object_r:rootfs:s0
+# proc labeling can be further refined (longest matching prefix).
+genfscon proc / u:object_r:proc:s0
+genfscon proc /net u:object_r:proc_net:s0
+
+. . . 
+
+```
+fs_use是对实实在在的文件系统打标签
+
+```bash
+# Label inodes via getxattr.
+fs_use_xattr yaffs2 u:object_r:labeledfs:s0;
+fs_use_xattr jffs2 u:object_r:labeledfs:s0;
+fs_use_xattr ext2 u:object_r:labeledfs:s0;
+fs_use_xattr ext3 u:object_r:labeledfs:s0;
+fs_use_xattr ext4 u:object_r:labeledfs:s0;
+
+. . . 
+```
+对于这些问价系统,安全上下文是作为扩展属性存在的,可以通过getattr函数从inode中读取到文件的安全属性.
+
+还有一点要注意,就是Android4.4之后make_ext4fs在制作system.img和userdata.img的时候也要指定file_contexts文件,用来初始化system和userdata分区下的文件的安全上下文.这在重打ROM包的时候要注意.
+
+
+
+#### 属性打标签
+
+```c
+static const struct selinux_opt seopts_prop[] = {
+        { SELABEL_OPT_PATH, "/property_contexts" },
+        { SELABEL_OPT_PATH, "/data/security/current/property_contexts" },
+        { 0, NULL }
+};
+struct selabel_handle* selinux_android_prop_context_handle(void)
+{
+    int policy_index = selinux_android_use_data_policy() ? 1 : 0;//判断选择利用哪一个属性策略文件,给属性打标签
+    struct selabel_handle* sehandle = selabel_open(SELABEL_CTX_ANDROID_PROP,
+                                                   &seopts_prop[policy_index], 1);
+    if (!sehandle) {
+        ERROR("SELinux:  Could not load property_contexts:  %s\n",
+              strerror(errno));
+        return NULL;
+    }
+    INFO("SELinux: Loaded property contexts from %s\n", seopts_prop[policy_index].value);
+    return sehandle;
+}
+```
+
+Android源码/external/sepolicy/property_contexts
+
+```bash
+##########################
+# property service keys
+#
+#
+net.rmnet               u:object_r:net_radio_prop:s0
+net.gprs                u:object_r:net_radio_prop:s0
+net.ppp                 u:object_r:net_radio_prop:s0
+net.qmi                 u:object_r:net_radio_prop:s0
+
+. . . . . 
+
+```
+因为ro.开头的属性是只读属性,不管谁都可以访问,因为无法修改其值,也就不会对系统造成影响.所以上述文件中没有对ro.的属性设定安全上下文.
+
+对于那些非只读属性,那么就必须要设置安全上下文了,因为修改这些属性的值,一般情况下都会对系统造成一定的影响.
+
+
+
