@@ -1,6 +1,6 @@
 ---
 layout: post
-title: Android 5.1 SEAndroid分析之打表签
+title: Android 5.1 SEAndroid分析之打标签
 categories: Android底层开发
 tags: [Android核心服务]
 date: 2015-09-30 22:46:37
@@ -15,6 +15,273 @@ date: 2015-09-30 22:46:37
 ### SEAndroid 初始化
 
 SEAndroid的初始化,肯定是在init进程中完成的了.
+
+init.c main函数中的代码片段:
+
+```c
+
+    union selinux_callback cb;//设置SEAndroid回调函数
+    cb.func_log = log_callback;
+    selinux_set_callback(SELINUX_CB_LOG, cb);
+
+    cb.func_audit = audit_callback;
+    selinux_set_callback(SELINUX_CB_AUDIT, cb);
+    
+    selinux_initialize();//初始化SEAndroid
+
+    /* These directories were necessarily created before initial policy load;
+     * and therefore need their security context restored to the proper value.
+     * This must happen before /dev is populated by ueventd.
+     */
+    /*将下面的目录的安全上下文恢复到系统原始设置*/
+    restorecon("/dev");
+    restorecon("/dev/socket");
+    restorecon("/dev/__properties__");
+    restorecon_recursive("/sys");
+
+```
+Android源码/external/libselinux/src/callback.c
+```c
+/* callback setting function */
+void
+selinux_set_callback(int type, union selinux_callback cb)
+{
+    switch (type) {
+    case SELINUX_CB_LOG:
+        selinux_log = cb.func_log;
+        break;
+    case SELINUX_CB_AUDIT:
+        selinux_audit = cb.func_audit;
+        break;
+    case SELINUX_CB_VALIDATE:
+        selinux_validate = cb.func_validate;
+        break;
+    case SELINUX_CB_SETENFORCE:
+        selinux_netlink_setenforce = cb.func_setenforce;
+        break;
+    case SELINUX_CB_POLICYLOAD:
+        selinux_netlink_policyload = cb.func_policyload;
+        break;
+    }
+}
+```
+利用selinux_set_callback函数设置了两个回调函数而已,这两个回调函数没有太大的实际作用.
+
+重点是下面这个SEAndroid初始化函数
+
+init.c
+```c
+static void selinux_initialize(void)
+{
+    /*检查SEAndroid是否开启*/
+    if (selinux_is_disabled()) {
+        return;
+    }
+    /*向内核装载策略文件*/
+    INFO("loading selinux policy\n");
+    if (selinux_android_load_policy() < 0) {
+        ERROR("SELinux: Failed to load policy; rebooting into recovery mode\n");
+        android_reboot(ANDROID_RB_RESTART2, 0, "recovery");
+        while (1) { pause(); }  // never reached
+    }
+    /*装载文件和属性的安全上下文*/
+    selinux_init_all_handles();
+    bool is_enforcing = selinux_is_enforcing();
+    INFO("SELinux: security_setenforce(%d)\n", is_enforcing);
+    security_setenforce(is_enforcing);
+}
+
+```
+首先检查SEAndroid是否开启:
+
+init.c
+```c
+static bool selinux_is_disabled(void)
+{
+#ifdef ALLOW_DISABLE_SELINUX
+    char tmp[PROP_VALUE_MAX];
+
+    if (access("/sys/fs/selinux", F_OK) != 0) {
+        /* SELinux is not compiled into the kernel, or has been disabled
+         * via the kernel command line "selinux=0".
+         */
+        return true;
+    }
+
+    if ((property_get("ro.boot.selinux", tmp) != 0) && (strcmp(tmp, "disabled") == 0)) {
+        /* SELinux is compiled into the kernel, but we've been told to disable it. */
+        return true;
+    }
+#endif
+
+    return false;
+}
+```
+先检查下面的文件夹是否存在,不存的话,表示内核不支持SELinux或者SELinux处于禁止模式.
+```bash
+/sys/fs/selinux
+```
+如果文件夹存在,再检查ro.boot.selinux这个属性值是否被设置,如果被设置了,且值为disabled,那也说明SElinux处于禁止模式.
+
+接着要向内核LSM模块装载编译好的策略文件.
+
+```c
+int selinux_android_load_policy(void)
+{
+    const char *mnt = SELINUXMNT;
+    int rc;
+    rc = mount(SELINUXFS, mnt, SELINUXFS, 0, NULL);//挂载文件系统selinuxfs到/sys/fs/selinux
+    if (rc < 0) {
+        if (errno == ENODEV) {
+            /* SELinux not enabled in kernel */
+            return -1;
+        }
+        if (errno == ENOENT) {
+            /* Fall back to legacy mountpoint. */
+            mnt = OLDSELINUXMNT;//挂载到/sys/fs/selinux不成功的话的话,将selinuxfs挂载到/selinux中
+            rc = mkdir(mnt, 0755);
+            if (rc == -1 && errno != EEXIST) {
+                selinux_log(SELINUX_ERROR,"SELinux:  Could not mkdir:  %s\n",
+                    strerror(errno));
+                return -1;
+            }
+            rc = mount(SELINUXFS, mnt, SELINUXFS, 0, NULL);
+        }
+    }
+    if (rc < 0) {
+        selinux_log(SELINUX_ERROR,"SELinux:  Could not mount selinuxfs:  %s\n",
+                strerror(errno));
+        return -1;
+    }
+    set_selinuxmnt(mnt);//将mnt的值也就是selinuxfs的挂载点赋值给selinux_mnt
+
+    return selinux_android_load_policy_helper(false);
+}
+
+```
+向内核装载策略文件实际上是下面这个函数
+```c
+static int selinux_android_load_policy_helper(bool reload)
+{
+    int fd = -1, rc;
+    struct stat sb;
+    void *map = NULL;
+
+    /*
+     * If reloading policy and there is no /data policy or
+     * that /data policy has the wrong version or the /data
+     * policy is disabled via safe mode, then just return.
+     * There is no point in reloading policy from / a second time.
+     */
+    if (reload && !selinux_android_use_data_policy())//init初始化SEAndroid的时候,传递的参数是false,因为是第一次装载
+        return 0;
+    /*policy_index初始值是0,也就是第一次装载的时候,会装载sepolicy_file[0],它的值是/sepolicy*/
+    fd = open(sepolicy_file[policy_index], O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) {
+        selinux_log(SELINUX_ERROR, "SELinux:  Could not open sepolicy:  %s\n",
+                strerror(errno));
+        return -1;
+    }
+    if (fstat(fd, &sb) < 0) {
+        selinux_log(SELINUX_ERROR, "SELinux:  Could not stat %s:  %s\n",
+                sepolicy_file[policy_index], strerror(errno));
+        close(fd);
+        return -1;
+    }
+    /*利用mmap将策略文件映射到内存*/
+    map = mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (map == MAP_FAILED) {
+        selinux_log(SELINUX_ERROR, "SELinux:  Could not map %s:  %s\n",
+            sepolicy_file[policy_index], strerror(errno));
+        close(fd);
+        return -1;
+    }
+    /*将策略文件装载到内核中去*/
+    rc = security_load_policy(map, sb.st_size);
+    if (rc < 0) {
+        selinux_log(SELINUX_ERROR, "SELinux:  Could not load policy:  %s\n",
+            strerror(errno));
+        munmap(map, sb.st_size);
+        close(fd);
+        return -1;
+    }
+
+    munmap(map, sb.st_size);
+    close(fd);
+    selinux_log(SELINUX_INFO, "SELinux: Loaded policy from %s\n", sepolicy_file[policy_index]);
+
+    return 0;
+}
+
+```
+
+编译好的策略文件位置存储在sepolicy_file数组中,如下所示.
+```c
+static const char *const sepolicy_file[] = {
+    "/sepolicy",
+    "/data/security/current/sepolicy",
+    NULL };
+```
+policy_index是当前策略文件索引值,其初始值为0,也就是Android系统启动的时候首先加载根目录下的sepolicy这个策略文件.
+
+```c
+int security_load_policy(void *data, size_t len)
+{
+    char path[PATH_MAX];
+    int fd, ret;
+
+    if (!selinux_mnt) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    snprintf(path, sizeof path, "%s/load", selinux_mnt);
+    fd = open(path, O_RDWR);
+    if (fd < 0)
+        return -1;
+
+    ret = write(fd, data, len);
+    close(fd);
+    if (ret < 0)
+        return -1;
+    return 0;
+}
+```
+前面已经将selinuxfs挂载到selinux_mnt中了,上述函数就是将mmap映射的策略文件,通过load,装载到了内核中去.
+
+![][1]
+
+
+<font color="#ff5588">注意事项:</font>
+
+在Android5.0(包括5.0)之前是首先尝试加载/data/security/current/sepolicy,加载不成功才会,才会尝试加载/sepolicy.
+
+而Android5.1中初始化的时候是只加载/sepolicy这个策略文件.但是
+
+
+```c
+bool selinux_android_use_data_policy(void)
+{
+    set_policy_index();
+    return (policy_index == 1);
+}
+
+```
+
+```c
+
+```
+
+
+
+
+
+
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/Android-seandroid-4-1.png
+
+
 
 
 http://blog.csdn.net/modianwutong/article/details/43114883

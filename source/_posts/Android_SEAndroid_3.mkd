@@ -5,7 +5,7 @@ categories: Android底层开发
 tags: [Android核心服务]
 date: 2015-09-30 15:48:31
 ---
-
+ 
 type转换分两种情况,一种是进程主体type转换,另一种是资源客体type转换.
 
 转换指的是什么意思呢?
