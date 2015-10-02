@@ -342,3 +342,363 @@ net.qmi                 u:object_r:net_radio_prop:s0
 
 
 
+### 设置进程主体的安全上下文
+
+Android系统中启动进程常用的两种方式:
+
+1. 一种是通过init进程来启动,这些进程一般都是Android系统native层的核心服务,通常以守护进程的方式启动;
+
+2. 另一种当然就是zygote来启动的应用App进程了.
+
+
+#### 设置守护进程的安全上下文
+
+这些守护进程通常都是指init进程中启动的rc文件中的service.前面文章也有介绍,service是如何启动的.service的安全上下文,肯定也是在它启动的时候设置的了.
+
+```c
+void service_start(struct service *svc, const char *dynamic_args)
+{
+    . . . .
+      if (is_selinux_enabled() > 0) {
+        if (svc->seclabel) {
+            scon = strdup(svc->seclabel);//rc文件中利用seclable指定关键字的话,复制一份
+            if (!scon) {
+                ERROR("Out of memory while starting '%s'\n", svc->name);
+                return;
+            }
+        } else {
+            char *mycon = NULL, *fcon = NULL;
+            . . . 
+            rc = getcon(&mycon);//如果rc文件中没有为service设置安全上下文,就先获得当前进程,也就是init进程的安全上下文
+            . . . 
+            rc = getfilecon(svc->args[0], &fcon);//获得service对应的可执行程序文件的安全上下文
+            . . . .
+            /*传递给内核,有内核计算新的安全上下文*/
+            rc = security_compute_create(mycon, fcon, string_to_security_class("process"), &scon);
+            . . . .
+            }
+        }
+}
+```
+如果rc文件中为service指定了安全上下文,那么就用指定的安全上下给service打标签.如果没有指定,那么就利用init进程的安全上下文和service对应的可执行程序文件的安全上下文,通过/sys/fs/selinux/create传递给内核.内核计算得到安全上下文之后,在通过create返回给用户空间.
+
+其中getfilecon函数获取service可执行程序文件的安全上下文,就是利用前面说getxattr的获取扩展属性的方式得到的.
+
+然后service_start函数中要利用setexeccon函数设置安全上下文,即给service打标签.
+
+
+```c
+   if (svc->seclabel) {
+            if (is_selinux_enabled() > 0 && setexeccon(svc->seclabel) < 0) {
+                ERROR("cannot setexeccon('%s'): %s\n", svc->seclabel, strerror(errno));
+                _exit(127);
+            }
+        }
+```
+<font color="#ff5588">这里有个疑问,就是只有rc文件中service设置了安全上下文的话,才会调用上面的函数,而我们通过计算得到的安全上下文,似乎没有被设置啊!!!!!</font>
+
+
+#### 设置应用App的安全上下文
+
+App进程打标签,就比较复杂了.app进程是zygote进程fork出来的,但是没有调用exec.
+    
+
+Android源码/frameworks/base/core/jni/com_android_internal_os_Zygote.cpp
+
+```c++
+static jint com_android_internal_os_Zygote_nativeForkSystemServer(
+        JNIEnv* env, jclass, uid_t uid, gid_t gid, jintArray gids,
+        jint debug_flags, jobjectArray rlimits, jlong permittedCapabilities,
+        jlong effectiveCapabilities) {
+
+. . . . .
+  pid_t pid = ForkAndSpecializeCommon(env, uid, gid, gids,
+                                      debug_flags, rlimits,
+                                      permittedCapabilities, effectiveCapabilities,
+                                      MOUNT_EXTERNAL_NONE, NULL, NULL, true, NULL,
+                                      NULL, NULL);
+. . . . .
+
+}
+```
+zygote进程必须以root身份运行,负责设置由他创建的子进程的DAC凭证,也就是UID,GID,GIDS,以及Capabilities.为了支持SEAndroid,还要设置其创建的子进程的安全上下文.
+
+forkAndSpecializeCommon()内部其实会调用fork()，而后设置gid、uid等信息.还会设置子进程的Capabilities,以及安全上下文.
+
+```c++
+static pid_t ForkAndSpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray javaGids,
+                                     jint debug_flags, jobjectArray javaRlimits,
+                                     jlong permittedCapabilities, jlong effectiveCapabilities,
+                                     jint mount_external,
+                                     jstring java_se_info, jstring java_se_name,
+                                     bool is_system_server, jintArray fdsToClose,
+                                     jstring instructionSet, jstring dataDir) {
+                . . . . .
+
+                 SetCapabilities(env, permittedCapabilities, effectiveCapabilities);
+
+                 SetSchedulerPolicy(env);  
+                . . . . .
+                  rc = selinux_android_setcontext(uid, is_system_server, se_info_c_str, se_name_c_str);
+                . . . . .
+}
+```
+是通过selinux_android_setcontext函数来设置安全上下文的.
+
+注意该函数的参数含义.
+
+```c++
+int selinux_android_setcontext(uid_t uid,
+                   int isSystemServer,
+                   const char *seinfo,
+                   const char *pkgname)
+{
+    char *orig_ctx_str = NULL, *ctx_str;
+    context_t ctx = NULL;
+    int rc = -1;
+
+    if (is_selinux_enabled() <= 0)//检查是否开启SEAndroid
+        return 0;
+
+    rc = getcon(&ctx_str);//获取当前进程安全上下文,也就是继承自zygote进程的安全是上下文
+    if (rc)
+        goto err;
+
+    ctx = context_new(ctx_str);//以ctx_str为模板创建一个新的安全上下文
+    orig_ctx_str = ctx_str;
+    if (!ctx)
+        goto oom;
+
+    /*在seapp_contexts[]中查找新的安全上下文*/
+    rc = seapp_context_lookup(SEAPP_DOMAIN, uid, isSystemServer, seinfo, pkgname, NULL, ctx);
+    if (rc == -1)
+        goto err;
+    else if (rc == -2)
+        goto oom;
+
+    ctx_str = context_str(ctx);//将上下文转换为字符串
+    if (!ctx_str)
+        goto oom;
+
+    rc = security_check_context(ctx_str);//验证上下文的正确性.
+    if (rc < 0)
+        goto err;
+
+    if (strcmp(ctx_str, orig_ctx_str)) {
+        rc = setcon(ctx_str);//如果查询得到的安全上下文和之前创建的上下文不一致,那么就将查询得到的上下文给新创建的进程打标签
+        if (rc < 0)
+            goto err;
+    }
+
+    rc = 0;
+. . . . . .
+}
+```
+seapp_context_lookup函数中首先调用下面的函数初始化seapp_context_init:
+
+```c
+__selinux_once(once, seapp_context_init);
+```
+
+```c
+static void seapp_context_init(void)
+{
+        selinux_android_seapp_context_reload();
+}
+```
+
+
+```c
+static char const * const seapp_contexts_file[] = {
+    "/seapp_contexts",
+    "/data/security/current/seapp_contexts",
+    NULL };
+
+
+int selinux_android_seapp_context_reload(void)
+{
+    . . . . 
+    set_policy_index();//确定索引
+
+    fp = fopen(seapp_contexts_file[policy_index], "r");
+
+    . . . .
+    余下的代码就是解析seapp_contexts文件内容,将其存在全局数组seapp_contexts[]中
+    seapp_contexts = (struct seapp_context **) calloc(nspec, sizeof(struct seapp_context *));
+    . . . .
+}
+```
+seapp_contexts文件内容:
+```bash
+isSystemServer=true domain=system_server
+user=system domain=system_app type=system_app_data_file
+user=bluetooth domain=bluetooth type=bluetooth_data_file
+user=nfc domain=nfc type=nfc_data_file
+user=radio domain=radio type=radio_data_file
+user=shared_relro domain=shared_relro
+user=shell domain=shell type=shell_data_file
+user=_isolated domain=isolated_app
+user=_app seinfo=platform domain=platform_app type=app_data_file
+user=_app domain=untrusted_app type=app_data_file
+```
+seapp_contexts文件的作用是定义用户名和domain之间的关系.文件中的注释也大概说了他的一些使用规则.
+
+该文件会根据输入的内容,找到匹配项,输出type.也就是进程domain和文件type.
+
+其中systemserver很特殊,不是根据用户名,而是isSystemServer布尔值来判断的,systemserver有固定的上下文:
+
+```bash
+u:r:system:s0
+```
+
+第2,3,4,5,6行中的user都在
+
+Android源码/system/core/include/private/android_filesystem_config.h 中android_ids数组中定义了.
+```c
+struct android_id_info {
+    const char *name;
+    unsigned aid;
+};
+static const struct android_id_info android_ids[] = {
+    { "root",          AID_ROOT, },
+
+    { "system",        AID_SYSTEM, },
+
+    { "radio",         AID_RADIO, },
+    { "bluetooth",     AID_BLUETOOTH, },
+    { "graphics",      AID_GRAPHICS, },
+    { "input",         AID_INPUT, },
+    { "audio",         AID_AUDIO, },
+    { "camera",        AID_CAMERA, },
+    { "log",           AID_LOG, },
+    { "compass",       AID_COMPASS, },
+
+. . . . . . . 
+```
+可以根据aid得到name ,在由name查询seapp_contexts得到domain和文件type.
+
+
+针对第6行user=_isolated:
+
+同样在Android源码/system/core/include/private/android_filesystem_config.h
+
+```c
+#define AID_ISOLATED_START 99000 /* start of uids for fully isolated sandboxed processes */
+#define AID_ISOLATED_END   99999 /* end of uids for fully isolated sandboxed processes */
+```
+
+因此可以根据useid,就能判断其name是否是_isolated,然后就可以得到domain和文件type.
+
+
+第7,8行因为user都为_app,所以就不能仅仅通过user查询了.所以又加了一个seinfo.
+
+因为Android系统自身包含的用户userid都是小于10000.所以大于10000的都是App用户.
+
+这个seinfo怎么来的呢?
+
+Andorid源码/external/sepolicy/mac_permission.xml:
+
+```xml
+<policy>
+
+    <!-- Platform dev key in AOSP -->
+    <signer signature="@PLATFORM" >
+      <seinfo value="platform" />
+    </signer>
+
+    <!-- All other keys -->
+    <default>
+      <seinfo value="default" />
+    </default>
+
+</policy>
+```
+
+如果App是在Android源码编译环境下,Android.mk中指定了LOCAL_CERTIFICATE : = platform的话 seinfo为platform.系统自带核心应用都是这个值了.
+
+LOCAL_CERTIFICATE可以取值:platform,shared,media.seinfo的值与其相同.不设置的话,为默认值default.
+
+
+第三方APK的话,通常seinfo值为default.
+
+在Android系统:/data/system/packages.list
+
+```
+com.android.providers.telephony 1001 0 /data/data/com.android.providers.telephony platform 1028,1015,3002,3001,3003
+com.android.providers.calendar 10002 0 /data/data/com.android.providers.calendar default 3003,1028,1015
+com.android.providers.media 10006 0 /data/data/com.android.providers.media default 1028,1015,1023,1024,2001,3003,3007
+com.android.wallpapercropper 10018 0 /data/data/com.android.wallpapercropper platform none
+
+ . . . . . .
+```
+
+其中每一行中的第6个字段就为这个App的seinfo值.
+
+现在已经直到如何根据seapp_contexts文件中的内容为App打标签了.
+
+继续前面代码的分析.
+
+
+seapp_context_lookup中的seapp_context_init函数就是加载seapp_contexts文件内容到一个全局的seapp_contexts[]数组中,方便查询.
+
+
+```c
+static int seapp_context_lookup(enum seapp_kind kind,
+                uid_t uid,
+                int isSystemServer,
+                const char *seinfo,
+                const char *pkgname,
+                const char *path,
+                context_t ctx)
+{
+
+. . . .
+__selinux_once(once, seapp_context_init);
+
+userid = uid / AID_USER;
+    appid = uid % AID_USER;
+    if (appid < AID_APP) {//AID=10000,小于10000的话,前面说了都是Android系统定义的用户
+        for (n = 0; n < android_id_count; n++) {
+            if (android_ids[n].aid == appid) {
+                username = android_ids[n].name;
+                break;
+            }
+        }
+        if (!username)
+            goto err;
+    } else if (appid < AID_ISOLATED_START) {//大于10000小于99000都是普通App用户
+        username = "_app";
+        appid -= AID_APP;
+    } else {//99000和99999之间的的都是isolated
+        username = "_isolated";
+        appid -= AID_ISOLATED_START;
+    }
+. . . . .. . 
+接下来就是以上面得到的username和以参数形式传递的进来的seinfo在seapp_contexts数组中查找其合适的进程domain和其文件type了.
+for (i = 0; i < nspec; i++) {
+        cur = seapp_contexts[i];
+. . . . . 
+}
+}
+
+```
+
+总的来说zygote给子进程设置安全上下文是先根据子进程的userid得到其username.然后利用MMAC机制得到seinfo.通过username和seinfo就可以查询seapp_contexts得出该给子进程设置什么安全上下文了.
+
+
+
+### 策略文件
+
+Android系统中策略文件分散的位置:根目录下和/data/security/current.
+
+sepolicy是二进制文件,是给linux内核使用的.
+
+file_contexts 是用来给文件和文件夹打标签的.
+
+property_contexts是用来给属性打标签的.
+
+seapp_contexts和/system/etc/security/mac_permissions.xml是给app打标签的.
+
+至于选择策略文件来自这两个目录中的哪一个,是根据这两个目录下的selinux_version文件的内容决定的,如果内容一致,那么选择data下的策略文件,否则选择根目录下的策略文件.
+
+
