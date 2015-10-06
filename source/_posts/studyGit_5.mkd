@@ -9,7 +9,7 @@ date: 2015-10-06 09:57:00
 从Git仓库中恢复已删除的分支或丢失的commit：
 
 <!--more-->
-
+ 
 在使用Git的过程中，有时可能会有一些误操作,比如：执行checkout -f 或 reset -hard 或 branch -d删除一个分支,结果造成本地（远程）的分支或某些commit丢失.
 
 这时，我们可以通过reflog来进行恢复，前提是丢失的分支或commit信息没有被git gc清除.
