@@ -13,7 +13,7 @@ ubuntu系统自带了qmke，但是版本较低，要使用前面安装的最新�
 sudo ln -s /usr/local/QT5.5/5.5/gcc_64/bin/qmake /usr/bin/qmake
 ```
 <!--more-->
-
+ 
 很坑啊，因为如果只是修改了bashrc，你编译的时候如果加了sudo,那就悲剧了。我就是犯了这个错误，导致后面编译的时候，有的版本不对，很难察觉。
 
 新开终端:
