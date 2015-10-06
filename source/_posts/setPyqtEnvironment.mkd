@@ -195,6 +195,12 @@ sudo python3 install-i18n.py   //安装中文语言包
 ```
 安装成功。
 
+最后修改家目录中的.eric6文件夹：
+```bash
+sudo chown username:username  .eric6 -R
+```
+否则你无法正常启动！！！
+
 记住啊，千万别在bashrc里面去添加什么环境变量，直接修改
 
 ```bash
