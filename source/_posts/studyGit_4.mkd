@@ -1,0 +1,337 @@
+
+---
+layout: post
+title: 版本控制系统Git的git flow分支模型
+categories: 项目管理
+tags: [代码管理]
+date: 2015-10-05 20:24:47
+---
+
+
+上一篇介绍了大神nvie的git分支策略，那么现在就来介绍以下大神nvie针对其分支策略，所提供的git flow脚本工具吧。
+
+利用这个套工具，可以方便快捷的按照上一篇介绍的分支策略进行项目开发。
+
+<!--more-->
+
+### git flow简介
+
+简单来说，git-flow 就是在 git branch git tag基础上封装出来的代码分支管理模型，把实际开发模拟成 master develop feature release hotfix support 几种场景，其中 master 对应发布上线，develop 对应开发，其他几个在不同的情况下出现。通过封装，git-flow 屏蔽了 git branch 等相对来说比较复杂生硬的命令(git branch 还是比较复杂的，尤其是在多分支情况下)，简单而且规范的解决了代码分支管理问题。
+
+[git flow][1]在github上的仓库地址。
+
+
+### git flow的安装
+
+ubuntu 下一键式安装：
+```bash
+sudo apt-get install git-flow
+```
+
+[通用linux安装git flow教程][3]
+
+[windows上git flow安装教程][2]
+
+#### 安装git flow tab键补全插件
+
+[插件githun仓库地址][4]
+
+ubuntu安装：
+
+```bash
+ git clone https://github.com/bobthecow/git-flow-completion.git
+```
+然后修改～/.bashrc,添加如下片段：
+
+```bash
+source /path/to/git-flow-completion.bash
+```
+然后新打开一个终端,输入git flow，然后按tab键，会看到有下面所示的信息，说明插件安装成功。 
+
+```bash
+shajia@shajia ~ $ git flow  tab键
+feature   help      hotfix    init      release   support   version
+
+```
+[windows安装该插件教程][5]
+
+
+
+### git flow 的使用
+
+#### 团队流程
+
+Git Flow流程的开发应当是这样的：
+
+1. 团队负责人，当新建一个Git项目后，master自动生成；
+
+2. 团队负责人创建生成develop分支；
+
+3. 团队成员当需要新功能时，创建生成该功能feature分支并开发；
+
+4. 团队成员每日任务完成并推送到线上对应分支上去；
+
+5. 当开发完成无误，团队负责人确认后将分支合并入develop中并更新线上develop;
+
+6. 在develop阶段性完成后，团队负责人创建预发布分支，并写上发布信息，测试通过后，后并入master中，创建新的tag；
+
+7. 如果发布分支遇到小的bug修复后，由团队负责人并入develop和master中；
+
+8. 如果遇到产品BUG，团队成员创建修复分支，成功修复后由团队负责人合并入develop和master中。
+
+需要经过不断的实践，研究gitlab与git flow的更优结合使用，以便充分发挥gtilab的功能，例如代码审查。这里并没有过多考虑gitlab。
+
+
+#### 创建项目
+
+项目负责人在gitlab服务创建一个项目testGitflow,添加README.md,除了默认的master分支外，在创建一个develop分支。
+
+
+#### git flow 初始化
+
+```bash
+git clone git@www.mygithub.com:test/testGitflow.git
+```
+进入testGitflow：
+
+```bash
+shajia@shajia ~/git/testGitflow $ git branch -a
+* master
+  remotes/origin/HEAD -> origin/master
+  remotes/origin/develop
+  remotes/origin/master
+```
+<font color="#ff5588">clone的仓库，默认本地分支为master,并且跟踪origin/master分支，通常在gitlab中将master设置为保护分支，除了项目负责人外，其他人无权向其推送代码。所以在本地要先创建develop分支。</font>
+
+检出服务器中develop分支到本地develop分支：
+```bash
+git checkout -b develop origin/develop  #检出origin/develop代码到本地develop分支，并切换到develop分支
+```
+初始化git flow仓库：
+
+```bash
+git flow init #初始化git flow
+```
+一路回车即可:
+```bash
+Which branch should be used for bringing forth production releases?
+   - develop
+   - master
+Branch name for production releases: [master] 
+
+Which branch should be used for integration of the "next release"?
+   - develop
+Branch name for "next release" development: [develop] 
+
+How to name your supporting branch prefixes?
+Feature branches? [feature/] 
+Release branches? [release/] 
+Hotfix branches? [hotfix/] 
+Support branches? [support/] 
+Version tag prefix? [] 
+
+```
+
+实质上这一步只是为git flow中的几个特性分支命名，但是并没有创建这些分支。
+
+初始化后，查看当前所有分支：
+
+```bash
+shajia@shajia ~/git/testGitflow $ git branch -a
+* develop
+  master
+  remotes/origin/HEAD -> origin/master
+  remotes/origin/develop
+  remotes/origin/master
+
+```
+
+#### 建立开发新功能的分支 
+
+```bash
+git flow feature start 功能名字
+```
+例如：
+
+```bash
+git flow featurestart WebCatLocalEncryption
+```
+结果：
+
+```bash
+切换到一个新分支 'feature/WebCatLocalEncryption'
+
+Summary of actions:
+- A new branch 'feature/WebCatLocalEncryption' was created, based on 'develop'
+- You are now on branch 'feature/WebCatLocalEncryption'
+
+Now, start committing on your feature. When done, use:
+
+     git flow feature finish WebCatLocalEncryption
+
+```
+查看现在本地有哪些分支:
+
+```bash
+shajia@shajia ~/git/testGitflow $ git branch 
+  develop
+* feature/WebCatLocalEncryption
+  master
+
+```
+可以看到当前已经处于feature/WebCatLocalEncryption分支了。
+
+现在可以进行此功能的开发了，经过若干次commit：
+
+```bash
+. . . .
+. . . . 
+git commit -am "初步完成wencat本地加密
+```
+
+#### 功能开发完毕
+
+使用git flow feature finish完成此次功能的开发。
+
+```bash
+shajia@shajia ~/git/testGitflow $ git flow feature finish
+切换到分支 'develop'
+您的分支与上游分支 'origin/develop' 一致。
+更新 8f0ac0a..21c9b9d
+Fast-forward
+ WebCatLocalEncryption.c | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+ create mode 100644 WebCatLocalEncryption.c
+已删除分支 feature/WebCatLocalEncryption（曾为 21c9b9d）。
+
+Summary of actions:
+- The feature branch 'feature/WebCatLocalEncryption' was merged into 'develop'
+- Feature branch 'feature/WebCatLocalEncryption' has been removed
+- You are now on branch 'develop'
+
+```
+可以看到已经自动合并到develop分支了，而且当前分支自动切换到develop分支。然后开发人员可以将develop同步到线上：
+
+```
+git push #当前所处develop更新到线上develop分支
+```
+<font color="#ff5588">此处有个问题：没有代码审查，开发者就把代码推送到线上develop分支了。有一个办法是，当项目负责人在gitlab上创建项目后，团队成员fork一份，然后clone自己fork的代码到本地，进行开发。功能开发完成后，在gitlab上向源项目发起pull request请求，这样会邮件通知相关人员审查代码，通过后，才能合并到线上develop分支。</font>
+
+当执行完git flow feature finish命令后，在观察当前所有本地分支：
+
+```bash
+shajia@shajia ~/git/testGitflow $ git branch 
+* develop
+  master
+```
+
+可以看到，已经自动删除feature/WebCatLocalEncryption。
+
+##### 在结束分支前自己Review自己的改动
+
+在执行git flow feature finish之前，可以利用
+
+```bash
+git flow feature diff
+```
+这时便会弹出meld图形化工具，展示我们修改的代码前后的变化。
+
+
+#### 如果多人共同开发新功能，或者短时间内没有完成该功能，可以将该分支publish到中心仓库上 
+
+```bash
+git flow feature publish WebCatLocalEncryption 
+```
+这时候，便可以把feature/WebCatLocalEncryption推送到远程分支。
+
+取得其它用户发布的新特性分支:
+
+```bash
+git flow feature pull origin WebCatLocalEncryption 
+```
+
+通过下面命令将远端对应的分支代码clone下来：
+
+```bash
+git flow feature track  WebCatLocalEncryption 
+```
+
+
+
+### 预发布分支开发
+
+执行git flow release start 1.0
+
+```bash
+shajia@shajia ~/git/testGitflow $ git flow release start 1.0
+Branches 'develop' and 'origin/develop' have diverged.
+And local branch 'develop' is ahead of 'origin/develop'.
+切换到一个新分支 'release/1.0'
+
+Summary of actions:
+- A new branch 'release/1.0' was created, based on 'develop'
+- You are now on branch 'release/1.0'
+
+Follow-up actions:
+- Bump the version number now!
+- Start committing last-minute fixes in preparing your release
+- When done, run:
+```
+在develop分支基础上创建release/1.0分支，并切换到release/1.0分支。之后便可以向新功能开发那样，进行开发了。操作都类似。
+
+完成release版本：
+
+```bash
+git flow release finish 1.0
+```
+
+不要忘记使用git push --tags将tags推送到远端.
+
+<font color="#ff5588">千万要注意的是，新功能开发分支和预发布分支都是基于develop分支的，所以创建前，先从服务器拉取最新的develop代码：</font>
+
+```bash
+git pull origin develop
+```
+
+#### 修复bug分支
+
+执行：git flow hotfix start bug1
+
+```bash
+shajia@shajia ~/git/testGitflow $ git flow hotfix start bug1
+切换到一个新分支 'hotfix/bug1'
+
+Summary of actions:
+- A new branch 'hotfix/bug1' was created, based on 'master'
+- You are now on branch 'hotfix/bug1'
+
+Follow-up actions:
+- Bump the version number now!
+- Start committing your hot fixes
+- When done, run:
+
+     git flow hotfix finish 'bug1'
+```
+基于master创建并切换到hotfix/bug1。
+
+同样的，在创建之前要先更新master代码到最新：
+```bash
+git pull origin master
+```
+其余操作也都类似了。
+
+### 总结
+
+git flow只是对一些git命令的封装而已，如果很熟练的话，也可以不使用git flow脚本。而且怎么和gitlab结合实现代码审查也需要大家一起不断的摸索，我个人经验很不足。
+
+[1]: https://github.com/nvie/gitflow
+[2]: https://github.com/nvie/gitflow/wiki/Windows
+[3]: https://github.com/nvie/gitflow/wiki/Linux
+[4]: https://github.com/bobthecow/git-flow-completion
+[5]: https://github.com/bobthecow/git-flow-completion/wiki/Install-Bash-git-completion
+
+
+
+
+
+

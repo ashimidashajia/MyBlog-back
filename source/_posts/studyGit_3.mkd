@@ -1,0 +1,147 @@
+---
+layout: post
+title: 版本控制系统Git的分支管理策略
+categories: 项目管理
+tags: [代码管理]
+date: 2015-10-05 15:53:26
+---
+
+git的分支管理策略,最流行的莫过于大神[nvie][1]提出的策略.
+
+<!--more-->
+
+一个中心版本库(我们叫它origin)至少包括两个分支，即“主分支(master)”和“开发分支(develop)”.
+
+要确保：团队成员从主分支(master)获得的都是处于可发布状态的代码，而从开发分支(develop)应该总能够获得最新开发进展的代码
+
+master分支:
+
+![][2]
+
+develop分支:
+
+![][3]
+
+
+团队开发,其中浅蓝色代表master分支,黄色代表develop分支,其他代表团队成员研发需要创建的分支.
+
+![][4]
+
+### 临时分支
+
+Master和Develop。前者用于正式发布，后者用于日常开发。为了满足开发需要.还要有一些临时性分支，用于应对一些特定目的的版本开发。
+
+临时性分支主要有三种：
+
+1. 功能（feature）分支
+
+2. 预发布（release）分支
+
+3. 修补bug（hotfixs）分支
+
+这三种分支都属于临时性需要，使用完以后，应该删除，使得代码库的常设分支始终只有Master和Develop。
+
+公司项目代码服务器中通常保存项目的Master和Develop,其他分支都在开发成员本地或者其私有远程仓库.
+
+
+#### 创建一个功能分支
+
+当要开发一个新功能时，从开发分支分出一个功能分支:
+
+```bash
+$ git checkout -b myfeature develop #创建并切换到myfeature分支
+```
+
+将完成的功能分支合并回开发分支.完成功能可能被合并到开发分支，一定会添加它们至即将发布版本：
+
+```bash
+git checkout develop #切换到develop分支
+
+git merge --no-ff myfeature #以no-ff方式将其合并到develop分支
+
+git branch -d myfeature #删除临时分支
+
+git push origin develop #将本地develop分支推送到远程develop分支中
+```
+
+--no-ff标签会使合并时总会创建一个新的提交对象(前面文章已经介绍了)，即使这个合并本来可以使用快速合并。这避免了丢失功能分支的历史信息和团队共同添加到功能分支的所有提交。对比一下
+
+![][5]
+
+在第二种情况下，你不可能从Git提交对象历史中看到实现的功能，你不得不手动地读取所有的日志消息。并且还原所有功能（即一组提交）是非常头疼大；如果使用了--no-ff标记那会变的很容易。
+
+它会创建更大的提交对象，不过受益会更大！
+
+
+#### 预发布分支
+
+预发布分支，它是指发布正式版本之前（即合并到Master分支之前），我们可能需要有一个预发布的版本进行测试。
+
+预发布分支是从Develop分支上面分出来的，预发布结束以后，必须合并进Develop和Master分支。它的命名，可以采用release-xxx的形式。
+
+
+流程:
+```bash
+git checkout -b release-1.2 develop #以develop为基础,创建一个预发布分支
+
+git checkout master #切回master分支
+
+git merge --no-ff release-1.2 #以no-ff方式合并到master
+
+git tag -a 1.2 # 对合并生成的新节点，做一个标签
+
+
+git checkout develop #切换到develop分支
+
+git merge --no-ff release-1.2 #合并到develop分支中
+
+git branch -d release-1.2 #删除预发布分支
+
+```
+
+#### 修补bug分支
+
+最后一种是修补bug分支。软件正式发布以后，难免会出现bug。这时就需要创建一个分支，进行bug修补。
+
+修补bug分支是从Master分支上面分出来的。修补结束以后，再合并进Master和Develop分支。它的命名，可以采用hotfix-xxx的形式。
+
+
+![][6]
+
+流程:
+
+```bash
+git checkout -b hotfix-0.1 master #以master分支为基础创建hotfix-0.1分支
+
+git checkout master #切回master分支
+
+git merge --no-ff hotfix-0.1 #将其合并到master
+
+git tag -a 0.1.1 #为master分支打标签
+
+git checkout develop #切回develop分支
+
+git merge --no-ff hotfix-0.1# 将其合并到develop
+
+git branch -d hotfix-0.1 #删除临时分支
+
+```
+
+最终一个开发流程如下所示:
+
+![][7]
+
+
+
+[1]: http://nvie.com/posts/a-successful-git-branching-model/
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-3-1.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-3-2.png
+[4]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-3-3.png
+[5]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-3-4.png
+[6]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-3-5.png
+[7]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-3-6.png
+
+
+
+
+

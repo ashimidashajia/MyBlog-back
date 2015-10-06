@@ -1,0 +1,67 @@
+---
+layout: post
+title: 版本控制系统Git的数据恢复与浏览commit的GUI工具
+categories: 项目管理
+tags: [代码管理]
+date: 2015-10-04 18:29:54
+---
+
+从Git仓库中恢复已删除的分支或丢失的commit：
+
+<!--more-->
+
+在使用Git的过程中，有时可能会有一些误操作,比如：执行checkout -f 或 reset -hard 或 branch -d删除一个分支,结果造成本地（远程）的分支或某些commit丢失.
+
+这时，我们可以通过reflog来进行恢复，前提是丢失的分支或commit信息没有被git gc清除.
+
+一般情况下，gc对那些无用的object会保留很长时间后才清除的.
+
+reflog是git提供的一个内部工具，用于记录对git仓库进行的各种操作.
+
+可以使用git reflog show或git log -g命令来看到所有的操作日志.
+
+恢复的过程很简单：
+
+1. 通过git log -g命令来找到我们需要恢复的信息对应的commit对象哈希，可以通过提交的时间和日期来辨别以及提交信息来综合判断。
+
+2. 通过git branch recover_branch commit哈希 来建立一个新的分支
+
+这样，我们就把丢失的东西给恢复到了recover_branch分支上了
+
+
+
+
+###查看commit提交的相关工具
+
+这些工具与数据恢复无关！！！！
+
+网上都说mac和windows中最好用的莫过于sourcetree了。我一直是ubuntu，所以也不知道这个好用在哪里了。
+
+ubuntu下的工具：
+
+GUI版本：gitk
+
+```bash
+sudo apt-get install gitk
+```
+使用：
+在代码仓库根目录，运行gitk即可
+
+![][1]
+
+
+
+
+
+命令行版本：tig
+
+```bash
+sudo spt-get install tig
+```
+同样在代码仓库根目录运行：
+
+![][2]
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/GitStudy-5-1.jpg
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/GitStudy-5-2.jpg
+

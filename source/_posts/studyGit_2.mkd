@@ -1,0 +1,395 @@
+---
+layout: post
+title: 版本控制系统Git的分支管理
+categories: 项目管理
+tags: [代码管理]
+date: 2015-10-05 09:31:35
+---
+
+前面一篇文章主要介绍了Git的简单原理和基本操作.现在介绍Git中最具特性的branch管理与使用模型.
+
+<!--more-->
+
+#### 分支的本质
+
+Git 中的分支，其实本质上仅仅是个指向 commit 对象的可变指针,就是从某个提交对象往回看的历史.每次commit提交之后,指针都会向前移动.
+
+git init之后会使用 master 作为分支的默认名字.在没有创建其他分支的条件下,如下图所示:
+
+![][1]
+
+
+创建分支,就是在上图的基础之上,分叉了而已,如下图所示:
+
+![][2]
+
+
+分支相关信息存储在.git/branch目录中.
+
+<font color="#ff5588">HEAD总是指向当前工作分支.</font>
+
+### 分支相关操作
+
+
+#### 分支的创建与切换分支
+
+```bash
+git branch XXX #创建分支XXX
+```
+上面的命令,紧紧是创建了分支XXX,即新建一个指针XXX,指向当前的commit对象.并没有切换到XXX分支.
+
+切换分支:
+```bash
+git checkout XXX #切换到XXX分支
+```
+
+创建并切换分支:
+```bash
+git checkout -b XXX #创建XXX分支,并切换到XXX分支
+```
+
+切换分支后那些处于已修改状态的文件，不受影响.
+
+分支不是你想切换就能切换的:
+
+git checkout branchname 更新HEAD指针指向branchname分支，用branchname分支指向的树更新暂存区和工作区
+
+留心你的暂存区或者工作目录里，那些还没有提交的修改，它会和你即将检出的分支产生冲突从而阻止 Git 为你切换分支.例如:
+
+
+![][3]
+
+切换分支时,提示如下错误:
+```bash
+error: The following untracked working tree files would be overwritten by checkout:
+    tt.c
+Please move or remove them before you can switch branches.
+Aborting
+
+```
+你要想切换分支,就要删除这个tt.c或者将tt.c移动到当前源码之外的地方了.
+
+
+如果是在master分支,利用git add tt.c将tt.c加入暂存区了,切换分支提示:
+
+```bash
+error: Your local changes to the following files would be overwritten by checkout:
+    tt.c
+Please, commit your changes or stash them before you can switch branches.
+Aborting
+```
+这时候要想切换分支,就要先在master分支新建一个提交,或者利用stash命令将当前工作区和暂存区压入git栈中.
+
+<font color="#ff5588">切换分支的时候最好保持一个清洁的工作区域</font>.
+
+#### 分支的合并
+
+查看所有的分支:
+```bash
+git branch -a
+```
+结果如下,加上-a可以看到远程分支,不加的话,只能看到本地分支.
+```bash
+  develop
+  master
+* task
+  remotes/origin/HEAD -> origin/master
+  remotes/origin/develop
+  remotes/origin/master
+
+```
+快进合并:Fast-forward,不需要解决冲突的问题
+
+![][4]
+
+如上图所示,master分支基础上,创建了一个bugfix分支,经过两次提交后,修复了bug.这时候要合并到master中.
+
+```bash
+git checkout master #切换到master分支
+git merge bugfix #将bug分支合并到当前分支
+```
+实际上就是将master向前移动,指向bugfix所指的commit对象,所以叫快进合并.
+
+![][7]
+
+
+如果在合并分之前,master分支又向前推进了,如下图所示:
+
+![][5]
+
+这时候合并的话,可能需要进行冲突合并.
+
+#####  智能合并:
+
+如果是下列三种情况,那么git会自动合并,无需人为干预.
+
+a. 多成员修改不同文件
+
+b. 多成员修改相同文件不同区域
+
+c. 同时修改文件名和文件内容
+
+##### 手动合并:
+
+1. 文件合并（修改同一文件的同一区域）
+
+比如说master和bugfix都对tt.c文件同一行进行了修改.
+
+master中的tt.c内容,只有一行内容:
+
+```c
+#include <stdio.h>
+```
+bugfix中将tt.c第一行内容为空行
+
+
+
+在master中执行合并操作的时候,会出现:
+```bash
+自动合并 tt.c
+冲突（添加/添加）：合并冲突于 tt.c
+自动合并失败，修正冲突然后提交修正的结果。
+```
+
+master中的tt.c会变成如下内容:
+```bash
+<<<<<<< HEAD
+#include <stdio.h>
+=======
+
+>>>>>>> bugfix
+```
+我们需要手动修改该文件,上面两部分,只能保留其一,即tt.c的内容要么为
+
+```c
+#include <stdio.h>
+```
+要么为空行.
+
+当文件冲突只有少量几行时,可以直接修改文件,去除冲突,但是如果文件中有多处位置都出现冲突的话,直接修改文件解决冲突就太不合适了.
+
+这个时候可以借助mergertool工具,来图形化的解决冲突.前一篇中也介绍了如何设置meld工具为git合并工具.
+
+
+![][6]
+
+2. 树合并（不同成员对同一文件重命名）
+
+关于树冲突，出现的原因是因为同时对一个文件进行了重命名。也可以使用mergetool修复冲突，但是更直接的方法是直接使用git rm删除想删除的文件，使用git add将需要的文件加到暂存区进而commit。
+
+前面文章中介绍了查看暂存区文件的命令:
+```bash
+git ls-files –s
+```
+
+该命令在树合并中很常用.
+
+##### 分支合并中的 non fast-forward选项
+
+前面说了fast-forward合并,即快进合并.使用 non fast-forward 选项，即使是可以 fast-forward 的合并也会建立新的提交并合.
+
+
+![][8]
+
+ non fast-forward 的合并，分支历史变化线路会更清晰.
+
+##### 分支合并的另一种方式rebase
+
+如下所示bugfix分支是从master分支分开出来的:
+
+![][9]
+
+最终合并的效果,如下所示:
+
+![][10]
+
+rebase bugfix 分支到 master 分支。bugfix 分支的历史记录会记录在 master 分支的后面,合并冲突后,将master直接快进到bugfix.因此，最终形成单一的一条线,
+
+提交 X 和 Y 有可能会发生冲突，所以可能需要合并冲突:
+
+![][11]
+
+最后将master直接快进到bugfix:
+
+![][12]
+
+两种合并方式的区别:
+
+Merge:修改內容的历史记录会维持现状，合并后的历史记录较复杂.
+    
+Rebase:修改內容的历史记录会在合并分支的后面,合并后的历史记录清晰，但是很容易冲突.
+
+
+#### 分支的删除与重命名
+
+git删除分支速度很快,很简单:
+```bash
+git branch -d branchname
+```
+重命名:
+
+```bash
+git branch -m branchName branchNewname
+```
+
+### 远程分支
+
+到目前为止,所有的操作都是在本地完成的.在公司的项目研发中,当本地开发的差不多的时候,就要想公司服务器推送了.
+
+#### 远程分支添加与删除
+
+添加远程分支,就是指定一个本地代码上传的网络服务器仓库地址,可以设置多个远程分支.
+
+查看当前已设置的远程分支
+
+```bash
+git remote
+```
+会列举出远程分支的名字.
+
+使用下面的命令,可以看到远程分支的详细信息:
+```
+git remote show name
+```
+结果:
+```bash
+* 远程 origin
+  获取地址：https://github.com/racaljk/tmp.git
+  推送地址：https://github.com/racaljk/tmp.git
+  HEAD分支：master
+  远程分支：
+    master 已跟踪
+  为 'git pull' 配置的本地分支：
+    master 与远程 master 合并
+  为 'git push' 配置的本地引用：
+    master 推送至 master (本地已过时)
+```
+
+使用下面的命令:
+
+```bash
+
+git remote add 远程分支代名词XXX  远程仓库url
+```
+之后就XXX就代表了远程仓库url,操作XXX,就是操作远程仓库.
+
+
+重命名远程分支:
+
+```bash
+git remote rename 原名 新名
+```
+
+删除远程分支:
+
+```bash
+ git remote rm xx
+```
+
+#### 跟踪远程分支
+
+当利用:
+
+```bash
+git clone url
+```
+克隆某个远程仓库到本地的时候,默认有一个本地分支master和一个远程仓库origin.
+
+本地master中的代码与远程仓库中master分支中的代码一致.
+
+利用
+```bash
+git remote show origin
+```
+可以查看远程仓库中有哪些分支.
+
+然后
+```bash
+git checkout -b origin/分支名子
+```
+就可以检出对应分支的代码.并自动创建检出和远程分支名字一样的本地分支.
+
+从远程分支 checkout 出来的本地分支，称为 跟踪分支 (tracking branch).跟踪分支是一种和某个远程分支有直接联系的本地分支
+
+在跟踪分支里输入 git push，Git 会自行推断应该向哪个服务器的哪个分支推送数据.
+
+在这些分支里运行 git pull 会获取所有远程索引，并把它们的数据都合并到本地分支中来。
+
+在克隆仓库时，Git 通常会自动创建一个名为 master 的分支来跟踪 origin/master。这正是 git push 和 git pull 一开始就能正常工作的原因.
+
+
+
+
+#### 从远程分支拉取代码
+
+当克隆远程仓库后一段时间,远程仓库中有了代码更新了,需要更新本地仓库代码.
+
+#### git pull
+
+该命令会拉取远程仓库代码并尝试自动合并到本地分支.
+
+远程分支变化:
+
+![][13]
+
+本地分支:
+
+![][14]
+
+这种情况下,利用git pull再合适不过了,直接快进合并就搞定了.
+
+![][15]
+
+
+如果远程仓库变化的部分和本地的有冲突,那么就要手动合并了.
+
+![][16]
+
+#### git fetch
+
+该命令只拉取远程仓库代码到本地,不自动合并.取得的新提交会导入在本地自动建立的分支中,并可以切换这个名为 FETCH_HEAD 的分支。
+
+也可以将这个分支合并到自己本地某个分支中.
+
+实际上git pull相当于先git fetch,然后再merger.
+
+
+
+
+#### 向远程仓库推送代码
+
+利用git push命令会把当前工作分支,推送到远端同名的远程分支.
+
+也可以
+```bash
+
+git push 本地分支名字 远程仓库/分支名字
+```
+
+远程仓库以快进合并的方式合并推送的新代码.一旦发生冲突,需要先git pull拉取最新的远程仓库代码,合并完成后,再次推送.
+
+
+另外拉取和推送代码时,请确保有对远程服务器操作的权限,需要设置ssh的,请设置SSH key.
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-2-1.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-2-2.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-2-3.png
+[4]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-2-4.png
+[5]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-2-5.png
+[6]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-2-6.png
+[7]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-2-7.png
+[8]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-2-8.png
+[9]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-2-9.png
+[10]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-2-10.png
+[11]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-2-11.png
+[12]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-2-12.png
+[13]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-2-13.png
+[14]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-2-14.png
+[15]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-2-15.png
+[16]: http://7xj6ce.com1.z0.glb.clouddn.com/study-git-2-16.png
+
+
+
+
+
+
