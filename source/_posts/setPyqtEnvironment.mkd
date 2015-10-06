@@ -1,6 +1,6 @@
 ---
-title: ubuntu 14.04搭建pyqt5开发环境
-categories: 随笔
+title: ubuntu 14.04+QT5.5+PyQt5.5+Eric-6开发环境搭建
+categories: Python
 date: 2015-10-06 14:58:40
 ---
 
@@ -8,15 +8,13 @@ date: 2015-10-06 14:58:40
 
 去QT官网或者qtcn论坛下载最新的QT版本,然后安装.此步骤忽略.
 
-配置环境变量,避免ubuntu系统自带的qt4相关命令干扰.
-
+ubuntu系统自带了qmke，但是版本较低，要使用前面安装的最新版本QT中的qmake。
 ```bash
-export QTDIR=/usr/local/Qt5.5/5.5/gcc_64
-
-export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${QTDIR}/lib
-
-export PATH=${QTDIR}/bin:${PATH}
+sudo ln -s /usr/local/QT5.5/5.5/gcc_64/bin/qmake /usr/bin/qmake
 ```
+<!--more-->
+
+很坑啊，因为如果只是修改了bashrc，你编译的时候如果加了sudo,那就悲剧了。我就是犯了这个错误，导致后面编译的时候，有的版本不对，很难察觉。
 
 新开终端:
 
@@ -49,7 +47,7 @@ cd sip-4.16.9
 
 python3 configure.py 
 
-sudo make
+make
 
 sudo make install
 ```
@@ -115,7 +113,7 @@ python3 configure.py -j8
 等待一分钟左右,然后执行下述命令:
 
 ```
-sudo make -j16
+ make -j16
 ```
 等待约两分钟后,执行:
 ```
@@ -146,16 +144,16 @@ QScintilla2是连接编译器和Python的接口，因此是Eric的必需前置�
 ```bash
 cd Qt4Qt5  
 qmake qscintilla.pro  
-sudo make  
+make  
 sudo make install
 ```
 
 安装Designer:
-
+PyQt5
 ```bash
 cd designer-Qt4Qt5  
 qmake designer.   
-sudo make  
+make  
 sudo make install 
 ```
 
@@ -164,7 +162,7 @@ sudo make install
 ```bash
 cd Python  
 python3 configure.py --pyqt=PyQt5  
-sudo make  
+make  -j16
 sudo make install
 ```
 提示出错:
@@ -177,7 +175,7 @@ Error: Qsci/qsciglobal.h could not be found in
 根据提示指定头文件路径
 
 ```bash
-python3 configure.py --pyqt=PyQt5 --qsci-incdir=/源码路径QScintilla-gpl-2.9/Qt4Qt5
+python3 configure.py --pyqt=PyQt5 --qsci-incdir=../Qt4Qt5
 ```
 
 以上步骤即可正确安装QScintilla2。需要注意的是Python bingdings安装时需要指定 --pyqt=PyQt5参数，否则默认是为PyQt4安装。或者直接修改其configure.py，将pyqt5_is_default = False改为pyqt5_is_default = True也可
@@ -185,7 +183,7 @@ python3 configure.py --pyqt=PyQt5 --qsci-incdir=/源码路径QScintilla-gpl-2.9/
 
 ### 安装Eric6
 
-我下砸的是eric6-6.0.9版本,和其对应的中文包eric6-i18n-zh_CN.GB2312-6.0.9.tar.gz
+我下载的是eric6-6.0.9版本,和其对应的中文包eric6-i18n-zh_CN.GB2312-6.0.9.tar.gz
 
 [Eric6官方下载][4]
 
@@ -195,20 +193,22 @@ python3 configure.py --pyqt=PyQt5 --qsci-incdir=/源码路径QScintilla-gpl-2.9/
 sudo python3 install.py           //安装主程序  
 sudo python3 install-i18n.py   //安装中文语言包  
 ```
+安装成功。
 
-参考博客:http://blog.csdn.net/idber/article/details/40076821
+记住啊，千万别在bashrc里面去添加什么环境变量，直接修改
 
-install package ‘libqt5svg5’ and ‘libqt5svg5-dev’.
+```bash
+sudo ln -s /usr/local/QT5.5/5.5/gcc_64/bin/qmake /usr/bin/qmake
+```
+否则各种奇葩问题，什么段错误了，版本不对了等等。
 
+如果遇到莫名其妙的问题：
 
-python3-pyqt5.qtsql
-python3-pyqt5.qtsql-dbg
-python3-pyqt5.qtsvg
-python3-pyqt5.qtsvg-dbg
-
-https://bugs.launchpad.net/ubuntu/+source/pyqt5/+bug/1477759
-
-python-qscintilla2
+```bash
+sudo rm  /usr/lib/python3/dist-packages/sip*
+sudo rm  /usr/lib/python3/dist-packages/PyQt5
+```
+然后严格按照上述操作步骤做吧。
 
 [1]: https://www.riverbankcomputing.com/software/pyqt/download5
 [2]: https://riverbankcomputing.com/software/sip/download
