@@ -214,7 +214,40 @@ message Foo {
 对于 Python，这个包声明符是被忽略的，因为Python模块是按照其在文件系统中的位置进行组织的。
 
 
+### protobuf使用流程
+
+1. 编写协议文件,也就是.proto文件
+
+2. 利用protoc命令将协议文件转换为我们需要的开发语言接口.该接口中包含了对协议中定义数据的操作方法.可以从生成的.h文件中查看有哪些接口,常用的就是设置字段数据,获取字段数据,序列化,反序列化等;
+
+    列举一些公用方法:
+```bash
+isInitialized(): 检查是否所有的required字段是否被赋值
+toString(): 返回一个便于阅读的message表示(本来是二进制的，不可读)
+byte[] toByteArray();: 序列化message并且返回一个原始字节类型的字节数组
+static XXX parseFrom(byte[] data);: 将给定的字节数组解析为message
+void writeTo(OutputStream output);: 将序列化后的message写入到输出流
+static Person parseFrom(InputStream input);: 读入并且将输入流解析为一个message
+```
+    
+
+3. 在项目中使用生成的接口操作协议数据;
+
+    协议中每个message都会转换为一个类,使用的时候创建一个消息对象,初始化里面的属性值并且序列化,然后可以存储到文件,可以socket发送等等.
+
+    使用数据的时候,先反序列化,然后就可以正常使用了.
+
+
+4. c++编译如下,注意加pthread库,否则出错.
+
+```bash
+g++  xx.cpp xx.pb.cc  -I /usr/local/protobuf/include -L /usr/local/protobuf/lib -lprotobuf -pthread
+```
+
 ### protobuf编码协议
+
+
+搞清楚编码协议,是为了能清楚数据大小,这样才调试socket程序的时候,能看懂数据长度的含义.
 
 
 在Protobuf中采用Base­128变长编码,所谓变长编码是和定长编码相对的,定长编码使用固定字节数来表示,如int32类型的数字固定使用4 bytes表示,而变长编码是需要几个字节就使用几个字节,如对于int32类型的数字1来说,只需要1 bytes足够。Base­128变长编码的原则就两条
@@ -267,7 +300,47 @@ g++ main.cpp test.pb.cpp -I ~/mylib/protobuf/include -L ~/mylib/protobuf/lib -lp
 0x96 
 0x1 
 ```
-参考博客：http://colobu.com/2015/01/07/Protobuf-language-guide
+
+一个Protobuf的消息包含一系列字段key/value,每个字段由一个变长32位整数作为字段头,后面跟随字段体。字段头,也就是key的格式如下:
+```bash
+(field_number << 3) | wire_type
+­field_number:   字段序号 
+­wire_type:  字段编码类型
+```
+字段编码类型如下:
+
+![][6]
+
+字段序号,就是在定义message中的字段的时候添加的标号.
+
+![][7]
+
+再看一个例子:
+
+![][8]
+
+
+看嵌套:
+
+```proto
+message Test1{
+requaried int32 a = 1;
+}
+message Test3{
+requaried Test1 c = 3;
+}
+
+```
+![][9]
+
+
+负数编码:
+
+采用ZigZag Encoding
+
+![][10]
+
+
 
 
 
@@ -280,9 +353,10 @@ g++ main.cpp test.pb.cpp -I ~/mylib/protobuf/include -L ~/mylib/protobuf/lib -lp
 [3]: https://cn.jarfire.org/protobuf.html
 [4]: http://7xj6ce.com1.z0.glb.clouddn.com/studyProtobuf-1.png
 [5]: http://7xj6ce.com1.z0.glb.clouddn.com/studyProtobuf-2.png
-
-
-
-
+[6]: http://7xj6ce.com1.z0.glb.clouddn.com/studyProtobuf-3.png
+[7]: http://7xj6ce.com1.z0.glb.clouddn.com/studyProtobuf-4.png
+[8]: http://7xj6ce.com1.z0.glb.clouddn.com/studyProtobuf-5.png
+[9]: http://7xj6ce.com1.z0.glb.clouddn.com/studyProtobuf-6.png
+[10]: http://7xj6ce.com1.z0.glb.clouddn.com/studyProtobuf-7.png
 
 
