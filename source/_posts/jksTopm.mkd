@@ -1,0 +1,60 @@
+---
+layout: post
+title: jks与pem的转换
+categories: 项目管理
+tags: [签名认证]
+date: 2015-10-14 00:40:45
+---
+
+现提供了一个JKS证书文件和证书的密码，需要转成PEM文件给SEAndroid的配置.
+
+<!--more-->
+
+从一个JKS的keystore中导出public key (certificate)
+
+
+先通过keytool导出成PKCS12格式(.p12后缀):
+
+
+```bash
+keytool -importkeystore -srckeystore test.jks -destkeystore test.p12 -srcstoretype jks -deststoretype pkcs12
+```
+结果;
+
+```bash
+oretype jks -deststoretype pkcs12
+输入目标密钥库口令:  
+再次输入新口令: 
+输入源密钥库口令:  
+已成功导入别名 test 的条目。
+已完成导入命令: 1 个条目成功导入, 0 个条目失败或取消
+
+```
+指定源(jks)文件和目标(pkcs)文件的文件名和类型.执行时输入设置给pkcs12证书的密码, 以及jks证书的密码.
+
+
+再通过openssl将pkcs12文件导出成pem格式文件.
+
+生成key 加密的pem证书:
+
+```bash
+ openssl pkcs12 -in test.p12 -out test.pem
+```
+
+双击生成的pem证书,如图所示：
+
+![][1]
+
+生成key 非加密的pem证书:
+
+```bash
+openssl pkcs12 -nodes -in test.p12 -out test-2.pem
+```
+双击生成的pem证书,如图所示：
+![][2]
+
+
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/jksToPem-1.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/jksToPem-2.png

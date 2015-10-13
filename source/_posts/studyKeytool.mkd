@@ -1,0 +1,285 @@
+
+---
+layout: post
+title: Android开发中keytool的使用
+categories: 项目管理
+tags: [签名认证]
+date: 2015年10月13日23:18:39
+---
+
+
+Keytool 是一个Java 数据证书的管理工具 ,Keytool 将密钥（key）和证书（certificates）存在一个称为keystore的文件中(通常都为.jks后缀的文件)。
+
+在keystore里，包含两种数据：
+
+(1)密钥实体（Key entity）——密钥（secret key）又或者是私钥和配对公钥（采用非对称加密）
+
+(2)可信任的证书实体（trusted certificate entries）——只包含公钥
+
+<!--more-->
+
+keytool工具包含在JDK里面，可以直接使用,该工具的重要选项如下：
+
+#### -genkey
+
+在用户主目录中创建一个默认文件".keystore",还会产生一个mykey的别名，mykey中包含用户的公钥、私钥和证书(在没有指定生成位置的情况下,keystore会存在用户系统默认目录。
+
+#### -alias
+
+产生别名,每个keystore都关联这一个独一无二的alias，这个alias通常不区分大小写
+
+#### -keystore   
+
+ 指定密钥库的名称(产生的各类信息将不在.keystore文件中)
+
+#### -keyalg      
+
+指定密钥的算法 (如 RSA  DSA（如果不指定默认采用DSA）)
+
+#### -validity   
+
+ 指定创建的证书有效期多少天
+
+#### -keysize    
+
+ 指定密钥长度
+
+#### -storepass   
+
+指定密钥库的密码(获取keystore信息所需的密码
+
+#### -keypass     
+
+指定别名条目的密码(私钥的密码)
+
+#### -dname      
+
+指定证书拥有者信息
+
+例如：  "CN=名字与姓氏,OU=组织单位名称,O=组织名称,L=城市或区域名称,ST=州或省份名称,C=单位的两字母国家代码
+
+#### -list        
+
+显示密钥库中的证书信息      
+
+#### -v           
+
+显示密钥库中的证书详细信息
+
+#### -export      
+
+下面是各选项的缺省值。
+-alias "mykey"
+
+-keyalg "DSA"
+
+-keysize 1024
+
+-validity 90
+
+-keystore 用户宿主目录中名为 .keystore 的文件
+
+-file 读时为标准输入，写时为标准输出 将别名指定的证书导出到文件 
+
+keytool -export -alias 需要导出的别名 -keystore 指定keystore -file 指定导出的证书位置及证书名称 -storepass 密码
+
+
+#### -file        
+
+参数指定导出到文件的文件名
+
+
+#### -delete      
+
+删除密钥库中某条目 
+
+eytool -delete -alias 指定需删除的别名  -keystore 指定keystore  -storepass 密码     
+
+#### -printcert   
+
+查看导出的证书信息
+
+keytool -printcert -file yushan.crt        
+
+#### -keypasswd   
+
+修改密钥库中指定条目口令   
+
+keytool -keypasswd -alias 需修改的别名 -keypass 旧密码 -new  新密码  -storepass keystore密码  -keystore
+
+#### -import     
+
+ 将已签名数字证书导入密钥库 
+
+keytool -import -alias 指定导入条目的别名 -keystore 指定keystore -file 需导入的证书
+
+
+#### 各选项的缺省值
+
+-alias "mykey"
+
+-keyalg "DSA"
+
+-keysize 1024
+
+-validity 90
+
+-keystore 用户宿主目录中名为 .keystore 的文件
+
+-file 读时为标准输入，写时为标准输出
+
+
+### <font color="#ff5588">key的生成</font>
+
+分阶段生成：
+
+```bash
+keytool -genkey -alias test(别名) -keypass 123456(别名密码) -keyalg RSA(算法) -keysize 1024(密钥长度) -validity 365(有效期，天单位) -keystore ./test.jks(指定生成证书的位置和证书名称) -storepass 123456(获取keystore信息的密码)；
+
+回车输入相关信息即可；
+```
+一次性生成：
+```bash
+  keytool -genkey -alias test -keypass 123456 -keyalg RSA -keysize 1024 -validity 365 -keystore ./test.jks -storepass 123456 -dname "CN=(名字与姓氏), OU=(组织单位名称), O=(组织名称), L=(城市或区域名称), ST=(州或省份名称), C=(单位的两字母国家代码)";(中英文即可)
+```
+
+### <font color="#ff5588">查看key信息</font>
+
+
+```bash
+keytool --list -v -keystore test.jks
+```
+结果如下（输入访问证书需要的密码）：
+
+```bash
+输入密钥库口令:  ### <font color="#ff5588">查看key信息</font>
+
+
+密钥库类型: JKS
+密钥库提供方: SUN
+
+您的密钥库包含 1 个条目
+
+别名: test
+创建日期: 2015-10-13
+条目类型: PrivateKeyEntry
+证书链长度: 1
+证书[1]:
+所有者: CN=shajia, OU=shajia, O=shajia, L=beijing, ST=beijing, C=cn
+发布者: CN=shajia, OU=shajia, O=shajia, L=beijing, ST=beijing, C=cn
+序列号: 1f6e4ae4
+有效期开始日期: Tue Oct 13 23:54:33 CST 2015, 截止日期: Wed Oct 12 23:54:33 CST 2016
+证书指纹:
+     MD5: 87:E9:57:1E:81:F9:E1:1B:B9:5B:DD:F8:AA:C4:DD:F4
+     SHA1: 88:BF:05:2A:A7:18:DA:EE:AA:00:96:11:BA:58:F3:C7:5A:B8:D7:57
+     SHA256: 41:C3:E0:A7:20:EA:75:5D:25:AB:ED:4F:1E:7F:35:80:E4:D8:D9:01:C6:CA:8C:30:11:C6:93:84:12:46:4B:B8
+     签名算法名称: SHA256withRSA
+     版本: 3
+
+扩展: 
+
+#1: ObjectId: 2.5.29.14 Criticality=false
+SubjectKeyIdentifier [
+KeyIdentifier [
+0000: 99 51 B0 72 C6 2B E4 FF   4F 08 8A 67 73 17 D0 D6  .Q.r.+..O..gs...
+0010: 88 53 CD 70                                        .S.p
+]
+]
+
+
+
+*******************************************
+*******************************************
+
+```
+
+以可打印方式列出信息：
+
+```bash
+keytool --list -rfc -keystore test.jks
+```
+结果如下：
+
+```bash
+输入密钥库口令:  
+
+密钥库类型: JKS
+密钥库提供方: SUN
+
+您的密钥库包含 1 个条目
+
+别名: test
+创建日期: 2015-10-13
+条目类型: PrivateKeyEntry
+证书链长度: 1
+证书[1]:
+-----BEGIN CERTIFICATE-----
+MIICYjCCAcugAwIBAgIEH25K5DANBgkqhkiG9w0BAQsFADBkMQswCQYDVQQGEwJjbjEQMA4GA1UE
+CBMHYmVpamluZzEQMA4GA1UEBxMHYmVpamluZzEPMA0GA1UEChMGc2hhamlhMQ8wDQYDVQQLEwZz
+aGFqaWExDzANBgNVBAMTBnNoYWppYTAeFw0xNTEwMTMxNTU0MzNaFw0xNjEwMTIxNTU0MzNaMGQx
+CzAJBgNVBAYTAmNuMRAwDgYDVQQIEwdiZWlqaW5nMRAwDgYDVQQHEwdiZWlqaW5nMQ8wDQYDVQQK
+EwZzaGFqaWExDzANBgNVBAsTBnNoYWppYTEPMA0GA1UEAxMGc2hhamlhMIGfMA0GCSqGSIb3DQEB
+AQUAA4GNADCBiQKBgQC0ZPJ28yF1iBAG24z0SvRgwQWt6IoUvVoz1GPX8MCPofblF+eD+4SM2AOT
+1EK4O8X8PC7R8624Nd3uWYrksRoIc9yN4NcEyS1YfDuIOjKLUCKXmfOnHcq2V9mKFyGprQR7+zGf
+IvNZM8eYmoOIbewqu8/ROFIjS8ILY0u2aBXApQIDAQABoyEwHzAdBgNVHQ4EFgQUmVGwcsYr5P9P
+CIpncxfQ1ohTzXAwDQYJKoZIhvcNAQELBQADgYEAsvQkg8X9eVD9vWal5KR051jAasNga3zGb7T2
+me9knY9QnWPD9LedWO5ZajBa/6w3ntyBjOglaKEUG/53NkPSSmdzEL+4W9JVDPT4W6V8eDv20WKJ
+HsUiG0s/7EtHSiXoSkCfRmLh3J0cfXpGY5yO/EOajkXdR+RRgaQ9KFcZzcU=
+-----END CERTIFICATE-----
+
+
+*******************************************
+*******************************************
+
+```
+### <font color="#ff5588">导出证书文件</font>
+```bash
+keytool -export -alias test -keystore test.jks -file test.crt(指定导出的证书位置及证书名称) -storepass 123456
+```
+双击即可打开test.crt，如下图所示：
+
+![][1]
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/study-keytool-1.png
+
+### <font color="#ff5588">查看导出的证书信息</font>
+
+```bash
+keytool -printcert -file yushan.crt
+```
+
+### <font color="#ff5588">添加一个信任证书到keystore文件</font>
+
+```bash
+keytool -import -alias newroot -file root.cer -keystore test.jks
+```
+
+
+### <font color="#ff5588">其他操作</font>
+
+证书条目的删除：
+```bash
+keytool -delete -alias test(指定需删除的别名) -keystore test.jks -storepass 123456
+```
+
+证书条目口令的修改：
+```bash
+keytool -keypasswd -alias test(需要修改密码的别名) -keypass yushan(原始密码) -new 123456(别名的新密码)  -keystore test.jks -storepass 123456
+```
+
+keystore口令的修改：
+```bash
+keytool -storepasswd -keystore test.jks(需修改口令的keystore) -storepass 123456(原始密码) -new yushan(新密码)
+```
+
+修改keystore中别名为test的信息
+
+```bash
+keytool -selfcert -alias test -keypass test -keystore test.jks -storepass 123456 -dname "cn=XXXX,ou=XXXX,o=XXXX,c=XXXX"
+```
+
+
+
+
+
