@@ -1,0 +1,154 @@
+---
+layout: post
+title: Android 5.1 SEAndroid实践之策略规则编写篇
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2015年10月13日15:27:20
+---
+
+
+SEAndroid的使用,一定要多动手去实践.多看Android源码中已经有的策略文件,从中总结出策略文件的相关技巧.
+
+
+以下策略规则,都来自Android源码/external/sepolicy中的.te文件.
+
+<!--more-->
+
+```bash
+  allow netd sysfs:file write;
+```
+
+1. allow：表示授权。除了allow之外，还有allowaudit、dontaudit、neverallow等；
+
+2. netd：source type，也叫Domain，Subject主体
+
+3. sysfs：target type，通常成为客体.可以理解为代表其后的file所对应的Type.
+
+4. file：objectclass，它代表能够给Domain操作的类。例如file、dir、socket等，Android中SecurityClass的定义在security_classes中。在Android系统中，有一些特殊的Class，如property_service，binder等。
+
+5. write：在该类objectclass中所定义的操作，例如file类支持ioctl，read，write等操作。access_vectors中定义了所有objectclass支持的操作。
+
+ 根据SELinux规范，完整的allow语句格式为：
+```bash
+  rule_name source_type target_type:class perm_s
+```
+
+<font color="#ff5588">注意:</font>
+如果有多个source_type，target_type，class或perm_set，可以用”{}”括起来；
+
+”~”号，表示除了”~”以外；
+
+”-”号，表示去除某项内容；
+
+"*"号，表示所有内容
+
+
+#### demo1
+
+```bash
+allow appdomain zygote_tmpfs:file read;
+```
+
+允许appdomain域的进程对zygote_tmpfs类型的文件（file）执行read操作；
+
+  rule_name：allow；
+
+  soruce_type：appdomain；
+
+  target_type：zygote_temfs；
+
+  object_class：file；
+
+  access_vector：read；
+
+
+#### demo2
+
+```bash
+  allow zygote appdomain:process { getpgid setpgid };
+```
+允许zygote域的进程对appdomain类型的进程执行getpgid和setpgid操作；
+
+  rule_name：allow；
+
+  soruce_type：zygote；
+
+  target_type：appdomain；
+
+  objectclass：process；
+
+  accessvector：getpgid setpgid；
+
+  “{}”中的内容表示一组type或perm_set，使用”{}”可以简化allow语句的书写，如果不用”{}”，上例就需要两条allow语句来分别设置setpgid和getpgid操作
+
+
+#### demo3
+
+```bash
+allow bluetooth { tun_device uhid_device hci_attach_dev }:chr_file { read write }
+```
+
+允许bluetooth域的进程对tun_device, uhid_device, hci_attach_dev类型的字符文件（chr_file）执行读写操作；\
+
+
+
+
+#### demo4
+
+```bash
+  allow init {
+
+    shell_data_file
+
+    app_data_file
+
+  }:{ chr_file file } ~{entrypoint execute_no_trans execmod execute relabelto};
+```
+表示允许init域的进程对shell_data_file,app_data_file类型的字符文件（chr_file），普通文件（file）执行除了entrypointexecute_no_trans execmod execute relabelto以外的操作；
+
+
+#### demo5
+
+```bash
+ allow init { file_type -system_file }:dir relabelto;
+```
+
+”-”符号表示去除某项，即允许init域的进程对file_type类型中除了system_file类型外的目录执行relabelto操作
+
+file_type其实是一个类型的集合，所有文件相关的类型都可以包含在这个集合中，如system_file，system_data_file，apk_data_file等，SELinux之所以有类型集合的概念也是为了简化安全策略语言的书写，如上例所示，所有对file_type类型设置的权限策略，都适用于包含在file_type集合中的所有类型，也就是说init域的进程可以对包含在file_type集合中的所有类型（system_data_file，apk_data_file等）的目录执行relabelto操作，system_file类型除外。       ”-”符号表示去除某项，即允许init域的进程对file_type类型中除了system_file类型外的目录执行relabelto操作；
+
+
+#### demo6
+
+```bash
+  allow system_server self:netlink_selinux_socket *;
+```
+ ”*”符号表示所有内容，即system_server域的进程能够对system_server类型执行所有netlink_selinux_socket类相关的操作；
+
+#### demo7
+
+```bash
+  neverallow {
+
+    domain -keystore
+
+  } keystore_data_file:dir ~{ open create read getattr setattr search relabelto };
+```
+
+简单来说就是不允许除keystore域外的其它域对keystore_data_file类型的目录执行open，create等操作；
+
+
+<font color="#ff5588">特别注意，前面提到权限必须显示声明，没有声明的话默认就没有权限。</font>那么neverallow语句就没有存在的必要了，因为“无权限”是不需要声明的。确实如此，neverallow语句的作用只是在生成安全策略文件时进行检查，判断是否有违反neverallow语句的策略存在。
+
+
+
+
+
+
+
+
+
+
+
+
+
