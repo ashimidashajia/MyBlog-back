@@ -1,0 +1,33 @@
+---
+layout: post
+title: Android 5.1 SEAndroid实践之文件特定许可篇
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2015-10-14 14:35:06
+---
+
+对于文件而言,有五种SELinux特定许可:relabelfrom，relabelto，execute_no_trans，enTRypoint和execmod。
+
+理解他们,对于阅读SEAndroid的策略文件也很有帮助.
+
+<!--more-->
+
+labelfrom和relabelto许可控制域类型将文件从一个类型改为另一个类型的能力，为了使重新标记文件成功，域类型必须要有该文件客体当前类型的relabelfrom许可，并且还要有新类型的relabelto许可，注意这些许可不允许控制确切的许可对，域可以将它有relabelfrom许可的任何类型改为它有relabelto许可的任何类型，在重新标记时可以增加约束。
+
+
+execute_no_trans许可允许域执行一个无域转换的文件，这个许可还不够执行一个文件，还需要execute许可，没有execute_no_trans许可，进程可能只能在一个域内执行，如果我们想要确保一个执行过程总是会引发一个域转换（或失败）时，此时就会想要排除execute_no_trans许可，例如：当登陆进程为一个用户登陆执行一个shell时，我们总是想要shell进程从有特权的登陆域类型转移出来。
+
+
+entrypoint许可控制使用可执行文件允许域转换的能力，execute，execute_no_trans和entrypoint许可允许精确控制什么代码可以执行什么域类型，SELinux控制各个程序域类型的能力是它能够提供强壮灵活的安全的主要原因。
+
+<font color="#ff5588">注意这里在详细说一下,在主体域转换中的作用:</font>
+
+      • execute：源类型（init_t）对目标类型（apache_exec_t,也就是主体对应的可执行程序）文件有execute许可
+
+      • transition：源域（init_t）对默认类型（apache_t,主体的域）必须要有transition许可
+
+      • entrypoint： 主体域（apache_t）对目标类型（apache_exec_t）文件必须要有entryponit许可
+
+
+
+execmod许可控制执行在进程内存中已经被修改了的内存映像文件的能力，这在防止共享库被另一个进程修改时非常有用，没有这个许可时，如果一个内存映像文件在内存中已经被修改了，进程就不能再执行这个文件了。说白了就是使被修改过的文件可执行（含有写时复制的意思）

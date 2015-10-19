@@ -1,0 +1,127 @@
+---
+layout: post
+title: UML类图中关系总结
+categories: 项目管理
+tags: [uml]
+date: 2015-10-04 18:29:54
+---
+
+UML类图，描述对象和类之间相互关系的方式包括：依赖（Dependency），关联（Association），聚合（Aggregation），组合（Composition），泛化（Generalization），实现（Realization）等。
+
+<!--more-->
+
+    依赖（Dependency）：元素A的变化会影响元素B，但反之不成立，那么B和A的关系是依赖关系，B依赖A；uml中用带箭头的虚线表示Dependency关系，箭头指向被依赖元素。
+
+    泛化（Generalization）：通常所说的继承（特殊个体 is kind of 一般个体）关系，不必多解释了。uml中用带空心箭头的实线线表示Generalization关系，箭头指向一般个体。
+
+    实现（Realize）：元素A定义一个约定，元素B实现这个约定，则B和A的关系是Realize，B realize A。这个关系最常用于接口。uml中用空心箭头和虚线表示Realize关系，箭头指向定义约定的元素。
+
+    关联（Association）：元素间的结构化关系，是一种弱关系，被关联的元素间通常可以被独立的考虑。uml中用实线表示Association关系，箭头指向被依赖元素。
+
+    聚合（Aggregation）：关联关系的一种特例，表示部分和整体（整体 has a 部分）的关系。uml中用带空心菱形头的实线表示Aggregation关系，菱形头指向整体。
+
+    组合（Composition）：组合是聚合关系的变种，表示元素间更强的组合关系。如果是组合关系，如果整体被破坏则个体一定会被破坏，而聚合的个体则可能是被多个整体所共享的，不一定会随着某个整体的破坏而被破坏。uml中用带实心菱形头的实线表示Composition关系，菱形头指向整体。
+
+
+其中依赖（Dependency）的关系最弱，而关联（Association），聚合（Aggregation），组合（Composition）表示的关系依次增强。换言之关联，聚合，组合都是依赖关系的一种，聚合是表明对象之间的整体与部分关系的关联，而组合是表明整体与部分之间有相同生命周期关系的聚合。
+
+各种关系的强弱顺序：
+
+<font color="#ff5588">
+        泛化 = 实现 > 组合 > 聚合 > 关联 > 依赖 
+</font>
+
+而关联与依赖的关系用一句话概括下来就是，依赖描述了对象之间的调用关系，而关联描述了对象之间的结构关系。
+
+
+### starUML
+
+[startUML][1] 是个开源软件，画基本的 UML 图是基本够用了，而且可以保存工程以便后续修改，还可以自动导入现有工程进行分析，感觉用来辅助编写文档再合适不过了.
+
+安装选择评估就行,付费后,可以避免弹窗提示.
+
+软件界面如下图所示:
+
+![][2]
+
+基本界面可以被分为 6 块：
+
+[1] 菜单栏
+
+[2] 显示你已经打开的所有设计图
+
+[3] 是绘图模块，鼠标选中，直接点到 [4] 上就可以放到画布上了
+
+[4] 画布
+
+[5] 是工程，右键可以添加删除设计图和模块
+
+[6] 绘图模块属性，可以重命名和修改属性 
+
+
+#### 结构图
+
+类继承:A继承B
+
+![][3]
+
+
+接口实现:A实现C接口
+
+![][4]
+
+这里要特别注意,staruml 采用的是实线,而uml语言一般推荐虚线+箭头.
+
+
+依赖:A依赖D
+
+大多数情况下，依赖关系体现在某个类的方法使用另一个类的对象作为参数．
+
+![][5]
+
+使用 Dependency，还可以在 stereotype 属性中可以填写一些说明，比如 use，create 等。
+
+
+直接关联:
+
+表现在代码层面，为被关联类B以类属性的形式出现在关联类A中，也可能是关联类A引用了一个类型为被关联类B的全局变量.  
+
+![][6]
+
+
+聚合:
+
+表现在代码层面，和关联关系是一致的，只能从语义级别来区分；
+
+![][7]
+
+
+组合:
+
+同样体现整体与部分间的关系，但此时整体与部分是不可分的，整体的生命周期结束也就意味着部分的生命周期结束.
+
+![][8]
+
+
+### 时序图
+
+水平方向列出所有对象，垂直方向从上到下表示时间增长。
+
+各对象之间通过消息传递信息，消息包括同步和异步之分。
+
+使用 CombinedFragment 可以表示逻辑，包括选择，循环，并行等。
+
+[参考文章][9]
+
+
+[1]: http://staruml.io/
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/startUML-1.png 
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/startUML-1-2.png
+[4]: http://7xj6ce.com1.z0.glb.clouddn.com/startUML-1-3.png
+[5]: http://7xj6ce.com1.z0.glb.clouddn.com/startUML-1-4.png
+[6]: http://7xj6ce.com1.z0.glb.clouddn.com/startUML-1-5.png
+[7]: http://7xj6ce.com1.z0.glb.clouddn.com/startUML-1-6.png
+[8]: http://7xj6ce.com1.z0.glb.clouddn.com/startUML-1-7.png
+[9]: http://m.blog.csdn.net/blog/pashanhuxp/41982285
+
+

@@ -6,9 +6,13 @@ tags: [签名认证]
 date: 2015-10-14 00:40:45
 ---
 
-现提供了一个JKS证书文件和证书的密码，需要转成PEM文件给SEAndroid的配置.
+android 一般除了使用jarsigner签名 还有使用signapk 后者位于android源码 前者位于jdk中。两者使用的文件格式不同前者使用JKS 后者使用公钥+私钥 是分开的.
+
+现提供了一个JKS证书文件和证书的密码，需要转成x509.pem文件给SEAndroid的配置,也可用signapk给apk签名
 
 <!--more-->
+
+### jks转pem
 
 从一个JKS的keystore中导出public key (certificate)
 
@@ -53,8 +57,67 @@ openssl pkcs12 -nodes -in test.p12 -out test-2.pem
 双击生成的pem证书,如图所示：
 ![][2]
 
+通常使用非加密的pen证书.
 
+
+接下来利用vi打开生成的非加密的.pem文件.
+
+复制“BEGIN CERTIFICATE”  “END CERTIFICATE” 到（新建个文件） cert.x509.pem
+
+```
+[
+-----BEGIN CERTIFICATE-----
+.............................
+-----END CERTIFICATE-----
+]
+```
+复制 “BEGIN RSA PRIVATE KEY”   “END RSA PRIVATE KEY” 到（同上） private.rsa.pem
+
+
+<font color="#ff5588">生成pk8格式的私钥</font>
+
+```bash
+openssl pkcs8 -topk8 -outform DER -in     private.rsa.pem -inform PEM -out private.pk8 -nocrypt
+```
+除了 cert.x509.pem private.pk8 ,其余的中间文件删除即可.
+
+```bash
+-nocrypt 这个参数设定key不加密.
+
+如果设置了这个参数 下面签名 只要证书+key 不需要密码了 
+如果加密 应该
+openssl pkcs8 -topk8 -outform DER -in private.rsa.pem -inform PEM -out private.pk8 接下来输入密码
+```
+<font color="#ff5588">利用signapk.jar给apk签名</font>
+
+```bash
+java -jar signapk.jar cert.x509.pem private.pk8 unsigned.apk signed.apk
+```
+
+### pem转jks
+
+[在github上下载工具][3]
+
+将工具在Linux环境下解压或者解压后Copy到Linux下，运行如下命令
+```bash
+keytool-importkeypair -k ~/android/debug.keystore(或者debug.jks) -p android -pk8 ~/android/platform.pk8 -cert ~/android/platform.x509.pem -alias anyname
+```
+
+其中 -k:表示要生成的签名的keystore的名字，包括路径名，这里存到主目录的android目录下，名字为debug.keystore。你可以随便取名
+
+-p 表示新生成的keystore的密码是什么，这里为androidi
+
+-pk8 表示要导入的pk8文件的名称，可以包括路径，这里是主目录的Android目录下，我们的pk8文件和pem文件都在这个目录下
+
+-cert 表示要导入的证书文件,和pk8文件在同一个目录
+
+-alias 表示给生成的debug.keystore取一个别名，这个名字只有我们在签名的时候才用的到，生成在文件名是debug.keystore,这个名字，随便取.
 
 
 [1]: http://7xj6ce.com1.z0.glb.clouddn.com/jksToPem-1.png
 [2]: http://7xj6ce.com1.z0.glb.clouddn.com/jksToPem-2.png
+[3]: https://github.com/getfatday/keytool-importkeypair
+
+
+
+
