@@ -3,7 +3,7 @@ layout: post
 title: UML类图中关系总结
 categories: 项目管理
 tags: [uml]
-date: 2015-10-04 18:29:54
+date: 2015-10-19 15:59:17
 ---
 
 UML类图，描述对象和类之间相互关系的方式包括：依赖（Dependency），关联（Association），聚合（Aggregation），组合（Composition），泛化（Generalization），实现（Realization）等。
