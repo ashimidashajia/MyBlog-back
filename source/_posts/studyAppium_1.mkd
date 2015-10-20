@@ -1,0 +1,163 @@
+---
+layout: post
+title: Appium环境搭建
+categories: 项目管理
+tags: [自动化测试]
+date: 2015-10-20 22:56:27
+---
+
+Appium是最近很流行的一套几乎支持所有主流OS的测试框架。我先刚接触，所以先不对其介绍，先搭环境，运行起来再说。
+
+<!--more-->
+
+[windows中的环境搭建链接][1]
+总的来说，在linux 环境下安装需要以下几步：
+
+#### 1. 安装andriod sdk和java jdk，
+
+这个就不多说了。
+
+这里要设置ANDROID_HOME和JAVA_HOME这两个环境变量的值
+
+```bash
+vim ~/.bashrc
+```
+添加以下内容（根据自己sdk和jdk的位置做修改）
+
+```
+export ANDROID_HOME=/usr/local/android-sdk-linux
+
+export JAVA_HOME=/usr/lib/jvm/java-7-openjdk-amd64
+export JRE_HOME=${JAVA_HOME}/jre 
+export CLASSPATH=.:${JAVA_HOME}/lib:${JRE_HOME}/lib
+export PATH=${JAVA_HOME}/bin:$PATH
+export JRE_HOME=${JAVA_HOME}/jre 
+export CLASSPATH=.:${JAVA_HOME}/lib:${JRE_HOME}/lib
+export PATH=${JAVA_HOME}/bin:$PATH
+```
+
+2. 安装python，版本要是2.6以上，ubuntu系统默认2.7版本，够用了。
+
+3. 安装node.js
+
+新版本的appium不允许以sudo身份安装，所以如果之前安装了nodejs,要先卸载
+```bash
+sudo apt-get remove nodejs
+```
+这里要借助linuxbrew来重新安装nodejs。
+
+```
+sudo apt-get install ruby
+sudo apt-get install git
+```
+修改~/.bashrc文件
+
+```
+vim ~/.bashrc
+```
+添加如下内容：
+```
+ export PATH=$HOME/.linuxbrew/bin:$PATH
+ export LD_LIBRARY_PATH=$HOME/.linuxbrew/lib:$LD_LIBRARY_PATH
+```
+使新环境变量生效：
+```bash
+source ~/.bashrc
+```
+
+安装linuxbrew:
+
+```bash
+ruby -e "$(wget -O- https://raw.github.com/Homebrew/linuxbrew/go/install)"
+```
+安装curl
+```bash
+sudo apt-get install curl
+```
+安装nodejs:
+
+```bash
+brew install node
+```
+
+4. 安装appium
+
+```bash
+npm install -g appium
+```
+耐心等待一会儿。
+
+5. 安装依赖库
+```bash
+npm install -g  wd
+```
+
+6. 安装appium-client
+
+clinet支持多个语言版本，如python，java，ruby等等，这里安装python。
+
+```bash
+ sudo pip install selenium
+ sudo pip install Appium-Python-Client
+```
+安装python3.4版本的话，使用如下命令：
+```
+ sudo pip3 install selenium
+ sudo pip3 install Appium-Python-Client
+
+```
+
+
+7. 检测环境是否搭建完毕
+
+```bash
+ appium-doctor
+```
+结果
+
+```
+Running Android Checks
+✔ ANDROID_HOME is set to "/usr/local/android-sdk-linux"
+✔ JAVA_HOME is set to "/usr/lib/jvm/java-7-openjdk-amd64."
+✔ ADB exists at /usr/local/android-sdk-linux/platform-tools/adb
+✔ Android exists at /usr/local/android-sdk-linux/tools/android
+✔ Emulator exists at /usr/local/android-sdk-linux/tools/emulator
+✔ Android Checks were successful.
+
+✔ All Checks were successful
+
+```
+说明环境OK，出错的话，请修改。
+
+```
+appium &
+```
+后台运行appium.
+
+8. 编写测试用例，启动计算器
+
+test.py
+```python
+from appium import  webdriver
+
+desired_caps = {}
+desired_caps['platformName'] = 'Android'
+desired_caps['platformVersion'] = '5.1.1'
+desired_caps['deviceName'] = 'ZX1G429LN3'
+desired_caps['appPackage'] = 'com.android.calculator2'
+desired_caps['appActivity'] = '.Calculator'
+
+driver = webdriver.Remote('http://localhost:4723/wd/hub', desired_caps)
+```
+
+```bash
+chmod +x test.py
+```
+
+Android连接到PC，启动usbdebug.
+
+```bash
+python test.py
+```
+会看到计算器被启动。
+[1]: http://www.cnblogs.com/nbkhic/p/3803883.html
