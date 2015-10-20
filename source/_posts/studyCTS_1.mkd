@@ -124,7 +124,9 @@ android.deviceadmin.cts.CtsDeviceAdminReceiver*
 
 不要勾选android.deviceadmin.cts.CtsDeviceAdminDeactivatedReceiver
 
-11. 关闭所有后台任务和正在运行的App,进入HOME界面
+11.settings中设置允许未知来源,安装APP
+
+12. 关闭所有后台任务和正在运行的App,进入HOME界面
 
 
 #### media cts
