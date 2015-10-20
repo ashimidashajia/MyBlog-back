@@ -1,0 +1,340 @@
+---
+layout: post
+title: CTS常用命令
+categories: 项目管理
+tags: [自动化测试]
+date: 2015-10-20 11:30:55
+---
+
+总结一下CTS中常用的命令:
+
+进入cts tools目录:
+
+```bash
+cd android-cts/tools
+```
+进入交互模式:
+
+```bash
+ ./cts-tradefed 
+```
+如下所示:(我事先已经连接了设备,所以他探测到了Android设备)
+
+```bash
+Android CTS 5.1_r3
+cts-tf > 
+10-20 11:51:09 I/DeviceManager: Detected new device V06001220
+```
+
+
+### 获取帮助
+
+1. 显示常用命令
+
+```bash
+cts-tf > help
+```
+
+2. 显示所有命令
+
+```bash
+cts-tf > help all
+```
+
+### 显示相关信息
+
+1. 显示当前连接的设备
+
+```bash
+list devices
+```
+结果
+```bash
+cts-tf > list devices
+Serial     State      Product  Variant  Build              Battery  
+V06001220  Available  qcom     titan    5.1.1_0.570.0.033  100 
+```
+此命令可以简写为
+
+```bash
+l d
+```
+2. 显示所有的测试包
+
+```bash
+list packages
+```
+结果
+```bash
+cts-tf > list packages
+android.JobScheduler
+android.aadb
+android.acceleration
+android.accessibility
+android.accessibilityservice
+android.accounts
+android.admin
+```
+命令简写: l packages
+
+3. 显示当前所有的测试计划
+
+```bash
+list plans
+```
+结果
+```bash
+CTS
+VM-TF
+CTS-media
+godin
+PDK
+CTS-mediastress
+Harmony
+CTS-kitkat-medium
+CTS-No-Media-Stream
+
+```
+
+测试的时候可以选择执行哪个计划,每个计划中实际上就是指定若干包,每个包里面有包含若干case用例.
+
+指定计划可以选择包含若干包,还可以指定包里面的若干用例,或者排除某些用例,默认包含包里面所有的case用例.
+
+4. 显示目前正在设备上执行的命令
+
+```bash
+list invocations
+```
+
+5. 显示所有即将要在设备上执行的命令:
+
+```bash
+list commands
+```
+
+6. 查看测试结果
+
+```bash
+list results
+```
+结果:
+```bash
+cts-tf > list results
+Session  Pass   Fail  Not Executed  Start time           Plan name  Device serial(s)  
+0        159    45    199965        2015.10.16_17.59.33  CTS        V06001486         
+1        38524  129   161516        2015.10.17_09.34.10  CTS        V06001486         
+2        26     0     0             2015.10.17_15.21.04  NA         V06001220         
+3        2      0     0             2015.10.17_15.23.24  NA         V06001220      
+```
+可以显示每个已经测试的计划中通过了多少case,失败了多少case,以及有多少case没有执行,计划开始时间,以及测试的设备等等信息.
+
+命令简写: l r
+
+### CTS测试
+
+测试可以如下几种情况:
+
+1. 测试某个包
+
+当前CTS版本包含哪些包,可以通过前面介绍的 list packages命令获取.
+
+```bash
+run cts --package/-p packagesName
+```
+比如现在要测试:android.accounts这个包中的所有case用例
+
+```bash
+run cts --packages android.accounts
+```
+或者
+```bash
+run cts -p android.accounts
+```
+之后会显示
+```bash
+cts-tf > run cts -p android.accounts
+10-20 13:44:53 I/TestInvocation: Starting invocation for 'cts' on build '5.1_r3' on device V06001220
+10-20 13:44:53 I/V06001220: Created result dir 2015.10.20_13.44.53
+10-20 13:44:53 I/CtsTest: ABIs: [armeabi-v7a, arm64-v8a]
+
+```
+然后显示各个case和整个包的检测的结果
+```bash
+10-20 13:45:27 I/V06001220: android.accounts.cts.AccountManagerTest#testUpdateCredentials PASS 
+10-20 13:45:28 I/V06001220: android.accounts.cts.AccountManagerTest#testUpdateCredentialsWithCallbackAndHandler PASS 
+10-20 13:45:29 I/V06001220: Saved log device_logcat_4413255561244897446.zip
+10-20 13:45:29 I/V06001220: Saved log host_log_6673843073308870420.zip
+10-20 13:45:29 I/V06001220: armeabi-v7a android.accounts package complete: Passed 31, Failed 0, Not Executed 0
+10-20 13:45:29 I/V06001220: Created xml report file at file:///home/genglei-cuan/work/cts/android-cts/tools/./../../android-cts/repository/results/2015.10.20_13.44.53/testResult.xml
+10-20 13:45:30 I/V06001220: XML test result file generated at 2015.10.20_13.44.53. Passed 62, Failed 0, Not Executed 0
+10-20 13:45:30 I/V06001220: Time: 36s
+```
+<font color="#ff5588">通常每个包,会有多个平台的版本,比如arm64-v8a和armeabi-v7a等,所以在测试的时候会看到同样的case跑了两遍的假象.</font>
+
+
+2. 测试某个包中的某个class中的case
+
+每个包中可能包含有若干class,每个class中有可能包含若干case.(至于如何查看case的名称,后面在讲)
+
+```bash
+run cts --class/-c className [--method/-m]
+```
+比如android.accounts中有cts.AccountManagerTest类,那么
+```bash
+run cts --class android.accounts.cts.AccountManagerTest
+```
+就会开始测试这个class了:
+```bash
+cts-tf > run cts --class android.accounts.cts.AccountManagerTest
+10-20 13:59:22 I/TestInvocation: Starting invocation for 'cts' on build '5.1_r3' on device V06001220
+10-20 13:59:22 I/V06001220: Created result dir 2015.10.20_13.59.22
+10-20 13:59:22 I/CtsTest: ABIs: [armeabi-v7a, arm64-v8a]
+
+```
+只跑class中的某个case,比如只跑上面的class中的testAccountRenameAndGetPreviousName
+
+```bash
+run cts --class android.accounts.cts.AccountManagerTest --method testAccountRenameAndGetPreviousName
+```
+
+该命令还有另一个变体
+```bash
+run cts -t <class_name>#<test_method_name>
+```
+使用如下:
+```bash
+run cts -t  android.accounts.cts.AccountManagerTest#testAccountRenameAndGetPreviousName
+```
+
+3. 在指定的设备上运行CTS测试
+
+```bash
+ run cts [options] --serial/-s device_ID
+```
+
+device_ID可以通过 list devices
+
+```bash
+cts-tf > list devices
+Serial     State      Product  Variant  Build              Battery  
+V06001220  Available  qcom     titan    5.1.1_0.570.0.033  
+```
+V06001220就是ID.
+
+下面是使用方法:
+```bash
+run cts --class android.accounts.cts.AccountManagerTest --serial V06001220
+```
+
+4. 指定CPU测试平台
+
+CPU主要有32 bit和64bit两个平台.针对64 bit的CPU,通常要兼容32bit,所以可以在测试的时候,指定
+
+```bash
+run cts [options] --force-abi 32|64
+```
+
+
+5. 同时在多个相同的设备上进行测试
+
+```
+ run cts [options] --shards number_of_shards
+```
+比如连接有两台设备的时候:
+```bash
+run cts --class android.accounts.cts.AccountManagerTest  --shards 2
+```
+这样理论上会缩短测试的时间,因为CTS会把case分配到这些设备上去运行.但是设备不要连的过多,否则不稳定,设备容易掉线.
+
+
+
+6. 查看测试报告
+
+每当测试完毕的时候,都会生成日志和测试报告,如下所示:
+```
+10-20 14:22:29 I/V06001220: Saved log device_logcat_3551254845224421177.zip
+10-20 14:22:29 I/V06001220: Saved log host_log_3822658142415389607.zip
+10-20 14:22:29 I/V06001220: armeabi-v7a android.accounts package complete: Passed 1, Failed 0, Not Executed 0
+10-20 14:22:29 I/V06001220: Created xml report file at file:///home/XXXXXX/work/cts/android-cts/tools/./../../android-cts/repository/results/2015.10.20_14.22.12/testResult.xml
+```
+ 
+可以看到日志和报告存储的位置.重点关注的是报告.报告是以html的形式生成的.下面我找到一个测试所有包的报告.
+
+位置在cts中的repository/results下面.都已日期为命名.
+```
+android-cts/repository/results/2015.10.17_09.34.10
+```
+
+内容如下:
+```
+cts_result.css  cts_result.xsl  logo.gif  newrule-green.png  testResult.xml
+```
+其中testResult.xml就是测试报告.
+
+<font color="#ff5588">经过测试发现,使用火狐浏览器能方便的打开报告,其他浏览器要么很慢,要么压根就打不开.</font>
+
+打开后如下所示:
+
+![][1]
+
+下面是所有的测试包的测试结果,比如包中有多少case通过了,多少失败了,多少没执行等等.
+
+![][2]
+
+<font color="#ff5588">点击上图中的包名,就可以看到该包的详细信息.就可以看到包里面有哪些class,以及class中有哪些case了</font>
+
+![][3]
+
+
+7. 继续测试没有执行的case
+
+通过报告可以看出,有很多case没有被执行:Not Executed.
+
+原因可能是没有达到某些case的测试环境要求,或者设备中途掉线了.执行一次CTS不容易,太耗时了.总不能每次都重新测试吧.
+
+首先查看执行结果:list results
+```
+cts-tf > list results
+Session  Pass   Fail  Not Executed  Start time           Plan name  Device serial(s)  
+0        159    45    199965        2015.10.16_17.59.33  CTS        V06001486         
+```
+可以看到有很多case没执行,其中第一列 session很重要,可以通过下面的命令:
+
+```
+run cts --continue-session session_value
+```
+即
+```
+run cts --continue-session 0
+```
+当我们根据报告中的信息,解决了某些问题或者设备掉线后,重新连接设备后,可以继续测试.
+
+
+8. 测试过程中禁止重启
+
+默认情况下,CTS测试中,会有多次重启,可以使用下面的选项禁止重启
+```bash
+run cts [options] --disable-reboot 
+```
+
+
+
+CTS中有很多package,每个[package中包含若干class,每个class中包含若干case,那么可以制定一个计划,指定测试哪些package,class和case.下一篇在介绍.
+
+
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/study-cts-2-1.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/study-cts-2-2.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/study-cts-2-3.png
+
+
+
+
+
+
+
+
+
+
+

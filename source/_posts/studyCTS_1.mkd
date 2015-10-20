@@ -1,0 +1,180 @@
+---
+layout: post
+title: CTS环境搭建
+categories: 项目管理
+tags: [自动化测试]
+date: 2015-10-20 10:14:41
+---
+
+CTS是谷歌退出的兼容性测试框架,使用前,需要配置一些环境.CTS框架也是学习Android 开发的绝佳案例.
+
+<!--more-->
+
+### 配置ADB和AAPT
+
+这两个工具都在Android SDK中.
+
+ADB在:
+```bash
+android-sdk-linux/platform-tools
+```
+AAPT在:
+```bash
+android-sdk-linux/build-tools/22.0.1
+```
+根据自己的实际情况,将这两个工具的路径加到系统PATH环境变量中去.
+
+
+### 配置JDK
+
+Android 5.0以上的CTS测试JDK版本:java 7
+
+其他Android版本:java 6.
+
+我的是Android5.1.1,所以需要java 7环境
+
+下载安装open jdk 7:
+```
+sudo apt-get install openjdk-7-jdk
+```
+如果安装有多个版本jdk,请用下面的命令选择open jdk 7:
+
+```
+$ sudo update-alternatives --config java 
+$ sudo update-alternatives --config javac  
+```
+
+### 下载CTS
+
+[Android 5.1 Compatibility Definition Document (CDD)][1]
+
+[Android 5.1 R3 Compatibility Test Suite (CTS) - ARM][2]
+
+[Android 5.1 R3 Compatibility Test Suite (CTS) - x86][3]
+
+[Android 5.1 R3 CTS Verifier - ARM][4]
+
+[Android 5.1 R3 CTS Verifier - x86][5]
+
+
+我们的设备是ARM架构的,所以下载Android 5.1 R3 Compatibility Test Suite (CTS) - ARM],解压即可使用.
+
+### 检测Android device
+
+将Android device连接到PC,开启usb debug,在pc执行下面:
+```bash
+adb devices
+```
+如果无法检测到设备,请
+
+```bash
+sudo vim /etc/udev/rules.d/51-android.rules.
+```
+添加如下内容
+```bash
+SUBSYSTEM=="usb", ATTR{idVendor}=="0bb4", MODE="0666", GROUP="plugdev"
+```
+其中idVerdor字段,使用
+```bash
+lsusb
+```
+命令,查看Android device设备的id.
+
+最后
+
+```bash
+sudo chmod a+r /etc/udev/rules.d/51-android.rules
+```
+
+
+### Android Device设置
+
+1. 设置语言为美国英语:Settings > Language & input > Language > English (United States)
+
+2. 恢复出厂设置:Settings > Backup & reset > Factory data reset(注意备份设备上的重要文件)
+
+3. 配置GPS:Turn on the location setting if there is a GPS or Wi-Fi / Cellular network feature on the device: Settings > Location 
+
+4. 连接到可用WIFI(能翻墙更好,否则可能导致一些net测试无法通过):Settings > Wi-Fi
+
+5. 取消锁屏密码:Settings > Security > Screen lock = 'None'
+
+6. 开启USB调试:Settings > Developer options > USB debugging. 
+
+7. 保持屏幕常亮: Settings > Developer options > Stay Awake
+
+8. 允许模拟位置: Settings > Developer options > Allow mock locations
+
+9. 将设备连接到CTS PC
+
+10. 安装和配置一些必要的app
+
+首先安装:
+```bash
+adb install -r android-cts/repository/testcases/CtsDeviceAdmin.apk
+```
+
+然后Settings > Accessibility > Accessibility > Delegating Accessibility Service
+
+选中
+```bash
+android.deviceadmin.cts.CtsDeviceAdminReceiver* 
+```
+的两个选项(可以横屏查看)
+
+不要勾选android.deviceadmin.cts.CtsDeviceAdminDeactivatedReceiver
+
+11. 关闭所有后台任务和正在运行的App,进入HOME界面
+
+
+#### media cts
+
+[CTS Media 1.1][6]
+[CTS Media 1.0][7]
+
+下载上面的某一个版本后,解压进入文件夹,执行:
+
+```bash
+ chmod u+x copy_media.sh
+```
+执行:
+
+```
+    To copy clips up to a resolution of 720x480, run: ./copy_media.sh 720x480
+    If you are not sure about the maximum resolution, try ./copy_media.sh all so that all files are copied.
+    If there are multiple devices under adb, add the -s (serial) option to the end. For example, to copy up to 720x480 to the device with serial 1234567, run: ./copy_media.sh 720x480 -s 1234567 
+```
+
+
+
+### 开始CTS测试
+
+进入
+
+```bash
+cd android-cts/tools
+```
+执行:
+```
+./cts-tradefed
+```
+会进入命令行交互模式.
+
+```
+run cts --plab CTS
+```
+就会开始CTS 测试,持续时间会很长,十几个小时.
+
+
+[1]: https://source.android.com/compatibility/5.1/android-5.1-cdd.pdf
+[2]: https://dl.google.com/dl/android/cts/android-cts-5.1_r3-linux_x86-arm.zip
+[3]: https://dl.google.com/dl/android/cts/android-cts-5.1_r3-linux_x86-x86.zip
+[4]: https://dl.google.com/dl/android/cts/android-cts-verifier-5.1_r3-linux_x86-arm.zip
+[5]: https://dl.google.com/dl/android/cts/android-cts-verifier-5.1_r3-linux_x86-x86.zip
+[6]: https://dl.google.com/dl/android/cts/android-cts-media-1.1.zip
+[7]: https://dl.google.com/dl/android/cts/android-cts-media-1.0.zip
+
+
+
+
+
