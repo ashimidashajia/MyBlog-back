@@ -3,7 +3,7 @@ layout: post
 title: armeabi-v7a armeabi arm64-v8a
 categories: Android底层开发
 tags: [Android核心服务]
-date: 2015-09-28 13:55:41
+date: 2015-10-20 20:22:13
 ---
 
 在CTS测试中,发现case有两种版本.一是运行在armeabi-v7a,另外一个是arm64-v8a.这代表什么?
