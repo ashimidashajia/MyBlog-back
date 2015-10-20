@@ -1,0 +1,160 @@
+---
+layout: post
+title: 定制CTS 测试计划plan
+categories: 项目管理
+tags: [自动化测试]
+date: 2015-10-20 15:12:13
+---
+
+CTS测试中的计划是以XML文件来定制的.位置
+```bash
+android-cts/repository/plans
+```
+<!--more-->
+
+
+#### 执行计划
+
+```
+run cts --plan planName
+```
+比如执行所有CTS测试
+
+```
+run cts --plan CTS
+```
+
+### CTS中自带的可用计划
+
+官方文档中说,CTS中包含如下计划:
+
+1. CTS—all tests required for compatibility.
+
+2. Signature—the signature verification of all public APIs(plan文件夹中没有该计划)
+
+3. Android—tests for the Android APIs
+
+4. Java—tests for the Java core library
+
+5. VM—tests for ART or Dalvik(plan文件夹中也没找到该计划)
+
+6. Performance—performance tests for your implementation(plan文件夹中没找到该计划)
+
+
+
+### 定制计划
+
+官方也没给出明确的语法,不过好在CTS中自带了很多计划,可以根据这些xml文件,总结一些规则.
+
+
+定制计划前,请先
+```bash
+run cts --plan CTS
+```
+进行全部CTS测试,这样做是为了从生成的报告中找到所有的package,class和case的详细信息.
+
+
+现在我们定制一个名为tmp的计划.
+
+1.首先创建一个名为tmp.xml的文件,内容如下
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<TestPlan version="1.0">
+
+</TestPlan>
+```
+
+后续的内容,都在tmp.xml中
+```xml
+<TestPlan version="1.0">
+
+</TestPlan>
+```
+之间添加.
+
+
+2. 添加某个包到该计划
+
+添加android.admin包到该计划中去:
+```xml
+<Entry name="android.admin"/>
+```
+同样可以添加若干其他包,包名请从报告中获取.
+
+3. 添加包中的某些class
+
+android.jni中有很多class,下面是仅仅测试jniCTest和jniCppTest
+
+```xml
+<Entry include="android.jni.cts.JniCTest;android.jni.cts.JniCppTest" name="android.jni"/>
+```
+
+有些时候,我们要测试某个package中除了某些class之外的剩下的所有class.
+
+比如测试android.provider包中除了BrowserTest和CalendarTest剩下所有的class
+
+```xml
+<Entry exclude="android.provider.cts.BrowserTest;android.provider.cts.CalendarTest" name="android.provider"/>
+```
+
+
+4. 添加某class中的某些case
+
+有时候,我们只是想测试某个class中的某几个case.
+
+比如只是测试android.os包中的BuildVersionTest的testReleaseVersion 用例;
+
+BuildTest类中的testIsSecureUserBuild用例,可以这么做:
+
+```xml
+<Entry include="android.os.cts.BuildVersionTest#testReleaseVersion;android.os.cts.BuildTest#testIsSecureUserBuild" name="android.os"/>
+```
+
+5. 排除class中的某些case
+
+同样使用到了exclude关键子和"#"符号.
+```xml
+<Entry exclude="android.hardware.cts.CameraTest#testVideoSnapshot;android.hardware.cts.CameraGLTest#testCameraToSurfaceTextureMetadata;android.hardware.cts.CameraGLTest#testSetPreviewTextureBothCallbacks;android.hardware.cts.CameraGLTest#testSetPreviewTexturePreviewCallback" name="android.hardware"/>
+```
+
+完整的tmp.xml
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<TestPlan version="1.0">
+    <Entry name="android.admin"/>
+    <Entry include="android.jni.cts.JniCTest;android.jni.cts.JniCppTest" name="android.jni"/>
+    <Entry exclude="android.provider.cts.BrowserTest;android.provider.cts.CalendarTest" name="android.provider"/>
+    <Entry include="android.os.cts.BuildVersionTest#testReleaseVersion;android.os.cts.BuildTest#testIsSecureUserBuild" name="android.os"/>
+    <Entry exclude="android.hardware.cts.CameraTest#testVideoSnapshot;android.hardware.cts.CameraGLTest#testCameraToSurfaceTextureMetadata;android.hardware.cts.CameraGLTest#testSetPreviewTextureBothCallbacks;android.hardware.cts.CameraGLTest#testSetPreviewTexturePreviewCallback" name="android.hardware"/>
+</TestPlan>
+```
+
+### 验证
+
+进入cts交互模式
+
+```
+cd android-cts/tools
+
+./cts-tradefed 
+
+```
+
+执行
+```
+list plans
+```
+查看当前所有的计划,可以看到 tmp 计划
+
+然后
+```
+run cts --plan tmp --disable-reboot
+```
+运行计划.
+
+
+这就是指定计划的简单流程以及xml文件的比那些规则.
+
+我也是刚接触CTS两三天,很多东西还不清楚,只能边使用边总结了.
