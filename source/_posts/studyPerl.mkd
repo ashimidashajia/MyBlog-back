@@ -4,6 +4,10 @@ categories: Linux基础
 date: 2015-10-29 19:23:47
 ---
 
+perl脚本快速入门demo.
+
+<!--more-->
+
 ```perl
 #!/usr/bin/env perl
 #
