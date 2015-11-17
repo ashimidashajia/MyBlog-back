@@ -1,0 +1,370 @@
+---
+layout: post
+title: DEX格式解析
+categories: App开发
+tags: [逆向工程]
+date: 2015-11-09 20:18:45
+---
+
+Dex是android上的可执行文件类型，其包含了几乎所有代码及变量的内容，正确使用并辨识DEX文件内的内容对分析问题及使用一些较为灵活的操作方式有很大的帮助.
+
+<!--more-->
+
+DEX文件从整体上看是一个索引的结构,类名,方法名,字段名等信息都存储在常量池中,这样能够减少存储空间.
+
+DEX格式定义在dalvik/libdex/DexFile.h的struct DexFile中:
+
+```c++
+struct DexFile {
+    /* directly-mapped "opt" header */
+    const DexOptHeader* pOptHeader;
+
+    /* pointers to directly-mapped structs and arrays in base DEX */
+    const DexHeader*    pHeader;
+    const DexStringId*  pStringIds;
+    const DexTypeId*    pTypeIds; 
+    const DexFieldId*   pFieldIds;
+    const DexMethodId*  pMethodIds;
+    const DexProtoId*   pProtoIds;
+    const DexClassDef*  pClassDefs;
+    const DexLink*      pLinkData;
+
+    /*
+     * These are mapped out of the "auxillary" section, and may not be
+     * included in the file.
+     */
+    const DexClassLookup* pClassLookup;
+    const void*         pRegisterMapPool;       // RegisterMapClassPool
+
+    /* points to start of DEX file data */
+    const u1*           baseAddr;
+
+    /* track memory overhead for auxillary structures */
+    int                 overhead;
+
+    /* additional app-specific data structures associated with the DEX */
+    //void*               auxData;
+};
+
+
+```
+如下图所示:
+
+![][1]
+
+
+### header
+
+是dex的文件头:
+
+```c
+struct DexHeader {
+    u1  magic[8];           /* includes version number */
+    u4  checksum;           /* adler32 checksum */
+    u1  signature[kSHA1DigestLen]; /* SHA-1 hash */
+    u4  fileSize;           /* length of entire file */
+    u4  headerSize;         /* offset to start of next section */
+    u4  endianTag;
+    u4  linkSize;
+    u4  linkOff;
+    u4  mapOff;
+    u4  stringIdsSize;
+    u4  stringIdsOff;
+    u4  typeIdsSize;
+    u4  typeIdsOff;
+    u4  protoIdsSize;
+    u4  protoIdsOff;
+    u4  fieldIdsSize;
+    u4  fieldIdsOff;
+    u4  methodIdsSize;
+    u4  methodIdsOff;
+    u4  classDefsSize;
+    u4  classDefsOff;
+    u4  dataSize;
+    u4  dataOff;
+};
+```
+其中magic字段,是dex的版本,包含8bit数据:
+
+```c
+/* DEX file magic number */
+#define DEX_MAGIC       "dex\n"
+
+/* current version, encoded in 4 bytes of ASCII */
+#define DEX_MAGIC_VERS  "036\0"
+
+/*
+ * older but still-recognized version (corresponding to Android API
+ * levels 13 and earlier
+ */
+#define DEX_MAGIC_VERS_API_13  "035\0"
+
+/* same, but for optimized DEX header */
+#define DEX_OPT_MAGIC   "dey\n"
+#define DEX_OPT_MAGIC_VERS  "036\0"
+```
+前4bit数据是"dex\n"代表是未经优化的dex文件,如果是"dey\n"代表是经过优化的dex文件,也就是odex文件.后4bit数据是版本.
+
+除了 magic字段外,还有adler32校验值,SHA-1哈希值,dex文件长度,header头大小等等.
+
+
+### DexStringId
+
+该数据类型定义为:
+
+```c++
+/*
+ * Direct-mapped "string_id_item".
+ */
+struct DexStringId {
+    u4 stringDataOff;      /* file offset to string_data_item */
+};
+
+```
+在Header中与之相关的成员是:
+```c
+u4  stringIdsSize;
+u4  stringIdsOff;
+```
+假设 stringIdsSize=898,stringIdsOff=112,则表示string索引区位于文件开始便宜112字节的位置,字符串的个数是898个.
+
+而在文件起始112个偏移后的位置区域中，存在着898个DexStringId类型的指针，每一个大小为u4（4个字节）.
+
+每一个DexStringId的结构体中都有一个stringDataOff的变量，它指示了这个字符串在数据区（DATA）内距离文件开始时的偏移量，如stringDataOff=35764,则真正的字符串数据是在文件起始位置0x8BB4偏移开始。
+
+### DexTypeId
+
+表示引用程序代码中使用到的具体数据类型:整型,字符串等等.
+
+```c++
+/*
+ * Direct-mapped "type_id_item".
+ */
+struct DexTypeId {
+    u4  descriptorIdx;      /* index into stringIds list for type descriptor */
+};
+```
+在Header中同样有:
+```c
+  u4  typeIdsSize;
+  u4  typeIdsOff;
+```
+指明有多少个数据类型,以及数据类型索引区在文件开始的便宜地址.在索引区中同样保存着typeIdsSize个DexTypeId类型的指针,DexTypeId 中的descriptorIdx指向了数据类型.
+
+### DexProtoId
+
+表示方法声明的结构体.
+
+```c++
+/*
+ * Direct-mapped "proto_id_item".
+ */
+struct DexProtoId {
+    u4  shortyIdx;          /* index into stringIds for shorty descriptor */
+    u4  returnTypeIdx;      /* index into typeIds list for return type */
+    u4  parametersOff;      /* file offset to type_list for parameter types */
+};
+```
+
+其中shortyIdx是方法声明字符串,格式为:返回值类型紧跟参数列表类型.很像函数签名.
+
+例如:VI,代表返回值为空,参数为I,也就是整型.所有的引用类型用L表示.
+
+returnTypeIdx指向DexTypeId列表的索引,表示返回值类型.
+
+parametersOff指向参数列表索引.
+
+Header同样有与之相关的字段.
+
+### DexFileId
+
+表示代码中的字段(也可理解为类的属性成员).
+
+
+```c++
+/*
+ * Direct-mapped "field_id_item".
+ */
+struct DexFieldId {
+    u2  classIdx;           /* index into typeIds list for defining class */
+    u2  typeIdx;            /* index into typeIds for field type */
+    u4  nameIdx;            /* index into stringIds for field name */
+};
+
+```
+很容易理解了,就是该字段属于哪个类,该字段的类型,以及该字段的名字.
+
+### DexMethodId
+
+表示代码中使用的方法.
+
+```c++
+/*
+ * Direct-mapped "method_id_item".
+ */
+struct DexMethodId {
+    u2  classIdx;           /* index into typeIds list for defining class */
+    u2  protoIdx;           /* index into protoIds for method prototype */
+    u4  nameIdx;            /* index into stringIds for method name */
+};
+```
+分别表示方法所属的类,方法原型(指向DexProtoId索引),方法名字.
+
+### DecClassDef
+
+该结构定义了代码中使用的类和相关的代码指令.
+
+```c++
+/*
+ * Direct-mapped "class_def_item".
+ */
+struct DexClassDef {
+    u4  classIdx;           /* index into typeIds for this class */
+    u4  accessFlags;
+    u4  superclassIdx;      /* index into typeIds for superclass */
+    u4  interfacesOff;      /* file offset to DexTypeList */
+    u4  sourceFileIdx;      /* index into stringIds for source file name */
+    u4  annotationsOff;     /* file offset to annotations_directory_item */
+    u4  classDataOff;       /* file offset to class_data_item */
+    u4  staticValuesOff;    /* file offset to DexEncodedArray */
+};
+```
+分别表示类的类型,访问标志,父类类型,类内部数据类型列表,类所在源文件名称,注解目录结构,类的数据部分,类中的静态数据.
+
+### DexClassData
+
+该数据类型对应DexClassDef中的classDataOff.
+
+在dalivk/libdex/DexClass.h中定义:
+
+```c++
+/* expanded form of class_data_item. Note: If a particular item is
+ * absent (e.g., no static fields), then the corresponding pointer
+ * is set to NULL. */
+struct DexClassData {
+    DexClassDataHeader header;
+    DexField*          staticFields;
+    DexField*          instanceFields;
+    DexMethod*         directMethods;
+    DexMethod*         virtualMethods;
+};
+```
+header:
+```c++
+/* expanded form of a class_data_item header */
+struct DexClassDataHeader {
+    u4 staticFieldsSize;
+    u4 instanceFieldsSize;
+    u4 directMethodsSize;
+    u4 virtualMethodsSize;
+};
+```
+指明静态字段个数,实例字段个数,直接方法(通过类直接访问的方法)个数和虚方法(通过类实例访问的方法)个数
+
+#### DexField
+
+```c++
+/* expanded form of encoded_field */
+struct DexField {
+    u4 fieldIdx;    /* index to a field_id_item */
+    u4 accessFlags;
+};
+```
+表示字段的类型和访问标志.
+
+其中filedIdx指向DexFiledId.
+
+accessFlags:
+
+```c++
+/*
+ * access flags and masks; the "standard" ones are all <= 0x4000
+ *
+ * Note: There are related declarations in vm/oo/Object.h in the ClassFlags
+ * enum.
+ */
+enum {
+    ACC_PUBLIC       = 0x00000001,       // class, field, method, ic
+    ACC_PRIVATE      = 0x00000002,       // field, method, ic
+    ACC_PROTECTED    = 0x00000004,       // field, method, ic
+    ACC_STATIC       = 0x00000008,       // field, method, ic
+    ACC_FINAL        = 0x00000010,       // class, field, method, ic
+    ACC_SYNCHRONIZED = 0x00000020,       // method (only allowed on natives)
+    ACC_SUPER        = 0x00000020,       // class (not used in Dalvik)
+    ACC_VOLATILE     = 0x00000040,       // field
+    ACC_BRIDGE       = 0x00000040,       // method (1.5)
+    ACC_TRANSIENT    = 0x00000080,       // field
+    ACC_VARARGS      = 0x00000080,       // method (1.5)
+    ACC_NATIVE       = 0x00000100,       // method
+    ACC_INTERFACE    = 0x00000200,       // class, ic
+    ACC_ABSTRACT     = 0x00000400,       // class, method, ic
+    ACC_STRICT       = 0x00000800,       // method
+    ACC_SYNTHETIC    = 0x00001000,       // field, method, ic
+    ACC_ANNOTATION   = 0x00002000,       // class, ic (1.5)
+    ACC_ENUM         = 0x00004000,       // class, field, ic (1.5)
+    ACC_CONSTRUCTOR  = 0x00010000,       // method (Dalvik only)
+    ACC_DECLARED_SYNCHRONIZED =
+                       0x00020000,       // method (Dalvik only)
+    ACC_CLASS_MASK =
+        (ACC_PUBLIC | ACC_FINAL | ACC_INTERFACE | ACC_ABSTRACT
+                | ACC_SYNTHETIC | ACC_ANNOTATION | ACC_ENUM),
+    ACC_INNER_CLASS_MASK =
+        (ACC_CLASS_MASK | ACC_PRIVATE | ACC_PROTECTED | ACC_STATIC),
+    ACC_FIELD_MASK =
+        (ACC_PUBLIC | ACC_PRIVATE | ACC_PROTECTED | ACC_STATIC | ACC_FINAL
+                | ACC_VOLATILE | ACC_TRANSIENT | ACC_SYNTHETIC | ACC_ENUM),
+    ACC_METHOD_MASK =
+        (ACC_PUBLIC | ACC_PRIVATE | ACC_PROTECTED | ACC_STATIC | ACC_FINAL
+                | ACC_SYNCHRONIZED | ACC_BRIDGE | ACC_VARARGS | ACC_NATIVE
+                | ACC_ABSTRACT | ACC_STRICT | ACC_SYNTHETIC | ACC_CONSTRUCTOR
+                | ACC_DECLARED_SYNCHRONIZED),
+};
+
+```
+#### DexMethod
+
+描述了方法的原型,名称,访问标志以及代码指令的偏移地址.
+
+```c++
+/* expanded form of encoded_method */
+struct DexMethod {
+    u4 methodIdx;    /* index to a method_id_item */
+    u4 accessFlags;
+    u4 codeOff;      /* file offset to a code_item */
+};
+```
+ methodIdx指向了DexMethodId索引.accessFlags指明了访问标志.
+
+codeOff表示指令代码的偏移地址.
+
+```c++
+
+/*
+ * Direct-mapped "code_item".
+ *
+ * The "catches" table is used when throwing an exception,
+ * "debugInfo" is used when displaying an exception stack trace or
+ * debugging. An offset of zero indicates that there are no entries.
+ */
+struct DexCode {
+    u2  registersSize;
+    u2  insSize;
+    u2  outsSize;
+    u2  triesSize;
+    u4  debugInfoOff;       /* file offset to debug info stream */
+    u4  insnsSize;          /* size of the insns array, in u2 units */
+    u2  insns[1];
+    /* followed by optional u2 padding */
+    /* followed by try_item[triesSize] */
+    /* followed by uleb128 handlersSize */
+    /* followed by catch_handler_item[handlersSize] */
+};
+
+
+```
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/dexfile-jiegou.png
+
+
+

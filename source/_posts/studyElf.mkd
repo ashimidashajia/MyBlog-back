@@ -1,0 +1,214 @@
+---
+layout: post
+title: Linux elf格式
+categories: App开发
+tags: [调试]
+date: 2015-11-17 13:17:34
+---
+
+
+### elf介绍
+
+ELF(Executable and Linkable Format)即可执行连接文件格式，是Linux下常见的默认目标文件格式.
+
+<!--more-->
+
+#### elf有三种类型
+
+1). 可重定位文件
+
+主要是编译过程中产生的.o文件,可以和其他目标文件一起创建可执行文件或者共享目标文件.
+
+2). 可执行文件
+
+用于生成进程映像,载入内存执行,常见的诸如编译好的可执行文件a.out.
+
+3). 共享目标文件
+
+用于和其他共享目标文件或者可重定位文件一起生成elf目标文件或者和执行文件一起创建进程映像，例如so库文件.
+
+##### elf文件的作用
+
+elf文件参与程序的连接(建立生成一个程序)和程序的执行(运行程序),所以可以从不同的角度理解elf格式的文件:
+
+1). 如果用于编译和链接(可重定位文件),则编译器和连接器将把elf文件看做是节头表描述的节的集合,程序头表可选.
+
+2). 如果用于加载执行(可执行文件),则加载器将把elf文件看做是程序头表描述的segment的集合,一个segment段可能包含多个节,节头表可选.
+
+3). 如果是共享文件(库文件),则两者都含有
+
+
+![][1]
+
+#### elf文件头
+
+elf文件头描述elf文件的总体信息.包括:系统相关,类型相关,加载相关,链接相关.
+
+系统相关:elf文件标识的魔术数，以及硬件和平台等相关信息
+
+类型相关: elf文件的三种类型
+
+加载相关: 包括程序头表相关信息
+
+链接相关: 节头表相关信息
+ 
+![][2]
+
+
+
+#### readelf命令的使用
+
+
+用法:
+```bash
+用法：readelf <选项> elf-文件
+ 显示关于 ELF 格式文件内容的信息
+ Options are:
+  -a --all               Equivalent to: -h -l -S -s -r -d -V -A -I
+  -h --file-header       Display the ELF file header
+  -l --program-headers   Display the program headers
+     --segments          An alias for --program-headers
+  -S --section-headers   Display the sections' header
+     --sections          An alias for --section-headers
+  -g --section-groups    Display the section groups
+  -t --section-details   Display the section details
+  -e --headers           Equivalent to: -h -l -S
+  -s --syms              Display the symbol table
+     --symbols           An alias for --syms
+  --dyn-syms             Display the dynamic symbol table
+  -n --notes             Display the core notes (if present)
+  -r --relocs            Display the relocations (if present)
+  -u --unwind            Display the unwind info (if present)
+  -d --dynamic           Display the dynamic section (if present)
+  -V --version-info      Display the version sections (if present)
+  -A --arch-specific     Display architecture specific information (if any)
+  -c --archive-index     Display the symbol/file index in an archive
+  -D --use-dynamic       Use the dynamic section info when displaying symbols
+  -x --hex-dump=<number|name>
+                         Dump the contents of section <number|name> as bytes
+  -p --string-dump=<number|name>
+                         Dump the contents of section <number|name> as strings
+  -R --relocated-dump=<number|name>
+                         Dump the contents of section <number|name> as relocated bytes
+  -w[lLiaprmfFsoRt] or
+  --debug-dump[=rawline,=decodedline,=info,=abbrev,=pubnames,=aranges,=macro,=frames,
+               =frames-interp,=str,=loc,=Ranges,=pubtypes,
+               =gdb_index,=trace_info,=trace_abbrev,=trace_aranges,
+               =addr,=cu_index]
+                         Display the contents of DWARF2 debug sections
+  --dwarf-depth=N        Do not display DIEs at depth N or greater
+  --dwarf-start=N        Display DIEs starting with N, at the same depth
+                         or deeper
+  -I --histogram         Display histogram of bucket list lengths
+  -W --wide              Allow output width to exceed 80 characters
+  @<file>                Read options from <file>
+  -H --help              Display this information
+  -v --version           Display the version number of readelf
+```
+
+
+常用选项:
+
+1). 查看elf头
+
+```bash
+readelf -h filename
+```
+
+2).查看程序表头信息
+
+```bash
+readelf -l filename
+```
+
+3). 查看节表信息头
+
+```bash
+readelf -S filename
+```
+
+4). 查看所有表头信息,也就是上面三个命令的合体
+
+```bash
+readelf -e filename
+```
+5). 详细显示某段/节的内容
+
+显示代码段详细信息
+```bash
+readelf -t .text filename
+```
+
+
+#### objdump命令的使用
+
+objdump命令是Linux下的反汇编目标文件或者可执行文件的命令，它还有其他作用.
+
+1). 显示文件的头信息
+```bash
+objdum -f filename
+```
+
+2). 反汇编那些需要执行指令的section
+
+```bash
+objdump -d filename
+```
+
+3). 反汇编所有section
+
+```bash
+objdump -D filename
+```
+
+4).显示elf文件section header信息
+
+```bash
+objdum -h filename
+``` 
+
+5). 显示elf文件所有header信息
+
+```bash
+objdump -x filename
+```
+
+6). 除了显示test的全部Header信息，还显示他们对应的十六进制文件代码
+
+```bash
+objdump -s filename
+```
+
+7). 输出C源代码和反汇编出来的指令对照的格式
+
+```bash
+objdump -S test.o
+```
+
+8). 只输出汇编代码
+
+```bash
+objdump -S filename
+```
+
+9) 反汇编二进制文件
+
+```bash
+objdump -D -b binary -m i386 a.bin
+```
+
+-D表示对全部文件进行反汇编，-b表示二进制，-m表示指令集架构，a.bin就是我们要反汇编的二进制文件
+
+10). 可以查看更多支持的指令集架构，如i386:x86-64，i8086等
+
+```bash
+objdump -m
+```
+
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/elf-1.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/elf-2.png
+
+
+
