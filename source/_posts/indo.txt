@@ -1,0 +1,7 @@
+---
+layout: post
+title: 发布程序时移除Android 调试Log 
+categories: App开发
+tags: [调试]
+date: 2015-11-09 14:02:52
+---

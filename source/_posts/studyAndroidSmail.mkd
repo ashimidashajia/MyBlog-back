@@ -1,0 +1,213 @@
+---
+layout: post
+title: Davlik虚拟机smali简单语法学习
+categories: App开发
+tags: [调试]
+date: 2015-11-09 14:02:52
+---
+
+Android的Davlik虚拟机是基于寄存器的,而Smali语言就是Davlik虚拟机的寄存器语言.当apk被反编译工具处理后,会得到一个smail文件夹,里面都是以.smail结尾的文件.
+
+<!--more-->
+
+Android采用的是java语言 进行开发，但是Android系统有自己的虚拟机Dalvik,代码编译最终不是采用的java的class，而是使用的smali。我们反编译得到的代 码，jar的话可能很多地方无法正确的解释出来，如果我们反编译的是smali则可以正确的理解程序的意思。因此，我们有必要熟悉smali语法。
+
+
+### 数据类型
+
+java里面包含两种类型，原始类型和引用类型(包括对象)，同时映射到smali也是有这两大类型。
+
+#### 原始类型
+
+```java
+    V void (只能用于返回值类型) 
+    Z boolean 
+    B byte 
+    S short 
+    C char 
+    I int 
+    J long 
+    F float 
+    D Double 
+```
+
+#### 对象类型
+
+```java
+Lpackage/name/ObjectName; 相当于java中的package.name.ObjectName 
+```
+L 表示这是一个对象类型
+
+package/name 该对象所在的包
+
+ObjectName 对象名称
+
+; 标识对象名称的结束.
+
+#### 数组的表示
+
+[I 表示一个int型的一维数组，相当于int[]；
+
+增加一个维度增加一个[,如[[I表示int[][]
+
+数组每一个维度最多255个;
+
+对象数组表示也是类似，如String数组的表示是[Ljava/lang/String
+
+### 寄存器与变量
+
+java中变量都是存放在内存中的，android为了提高性能，变量都是存放在寄存器中的，寄存器为32位，可以支持任何类型，其中long和double是64为的，需要使用两个寄存器保存.
+
+寄存器采用v和p来命名
+
+v表示本地寄存器，p表示参数寄存器，关系如下
+
+如果一个方法有两个本地变量，有三个参数:
+
+```java
+v0 第一个本地寄存器 
+v1 第二个本地寄存器 
+v2 p0 (this) 
+v3 p1 第一个参数 
+v4 p2 第二个参数 
+v5 p3 第三个参数
+```
+当然，如果是静态方法的话就只有5个寄存器了，不需要存this了。
+
+.registers 使用这个指令指定方法中寄存器的总数
+
+.locals 使用这个指定表明方法中非参寄存器的总数，放在方法的第一行。
+
+### 方法和字段的表示
+
+#### 方法签名
+
+```java
+methodName(III)Lpackage/name/ObjectName;  
+```
+
+methodName标识方法名，III表示三个整形参数，Lpackage/name/ObjectName;表示返回值的类型。
+
+#### 方法的表示
+
+```java
+Lpackage/name/ObjectName;——>methodName(III)Z
+```
+即 package.name.ObjectName中的 function boolean methondName(int a, int b, int c) 类似这样子.
+
+#### 字段的表示
+
+```java
+Lpackage/name/ObjectName;——>FieldName:Ljava/lang/String; 
+```
+
+#### 方法的定义
+
+例如:
+
+```java
+private static int sum(int a, int b) { 
+    return a+b; 
+ } 
+```
+对应的smail代码:
+```java
+.method private static sum(II)I 
+.locals 4 #表示需要申请4个本地寄存器 
+.parameter 
+.parameter #这里表示有两个参数 
+.prologue 
+.line 27 
+move v0, p0 
+.local v0, a:I 
+move v1, p1 
+.local v1, b:I 
+move v2, v0 
+move v3, v1 
+add-int/2addr v2, v3 
+move v0, v2 
+.end local v0 #a:I 
+return v0 
+.end method
+```
+函数声明使用.method开始 .end method结束，java中的关键词private,static 等都可以使用，同时使用签名来表示唯一的方法，这里是sum(II)I。
+
+#### 声明属性
+
+比如：
+```java
+private TextView mTextView;
+```
+对应smail:
+
+```java
+.field private mTextView:Landroid/widget/TextView;
+```
+
+### 指令执行
+
+```java
+move v0, v3 #把v3寄存器的值移动到寄存器v0上.
+
+const v0， 0x1 #把值0x1赋值到寄存器v0上。
+
+invoke-static {v4, v5}, Lme/isming/myapplication/MainActivity;->sum(II)I #执行方法sum(),v4,v5的值分别作为sum的参数。
+```
+
+
+### smail 语法小结
+
+```java
+.field private isFlag:z　　定义变量
+
+.method　　方法
+
+.parameter　　方法参数
+
+.prologue　　方法开始
+
+.line 12　　此方法位于第12行
+
+invoke-super　　调用父函数
+
+const/high16  v0, 0x7fo3　　把0x7fo3赋值给v0
+
+invoke-direct　　调用函数
+
+return-void　　函数返回void
+
+.end method　　函数结束
+
+new-instance　　创建实例
+
+iput-object　　对象赋值
+
+iget-object　　调用对象
+
+invoke-static　　调用静态函数
+```
+
+### 跳转分支
+
+```java
+"if-eq vA, vB, :cond_**"   如果vA等于vB则跳转到:cond_**
+"if-ne vA, vB, :cond_**"   如果vA不等于vB则跳转到:cond_**
+"if-lt vA, vB, :cond_**"    如果vA小于vB则跳转到:cond_**
+"if-ge vA, vB, :cond_**"   如果vA大于等于vB则跳转到:cond_**
+"if-gt vA, vB, :cond_**"   如果vA大于vB则跳转到:cond_**
+"if-le vA, vB, :cond_**"    如果vA小于等于vB则跳转到:cond_**
+"if-eqz vA, :cond_**"   如果vA等于0则跳转到:cond_**
+"if-nez vA, :cond_**"   如果vA不等于0则跳转到:cond_**
+"if-ltz vA, :cond_**"    如果vA小于0则跳转到:cond_**
+"if-gez vA, :cond_**"   如果vA大于等于0则跳转到:cond_**
+"if-gtz vA, :cond_**"   如果vA大于0则跳转到:cond_**
+"if-lez vA, :cond_**"    如果vA小于等于0则跳转到:cond_**
+```
+
+
+
+
+
+
+
+

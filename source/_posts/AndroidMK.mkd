@@ -1,0 +1,26 @@
+---
+layout: post
+title: Android.mk 常用语法总结
+categories: Android底层开发
+tags: [Android编译]
+date: 2015-11-05 13:20:55
+---
+
+
+Android.mk其实就是和Makefile差不多,知识很零碎,需要便用边总结.
+
+<!--more-->
+
+### 自定义宏
+
+如果想在源文件中使用一个自己定义的宏，ex. FLAG_TEST，就需要在当前源文件所在目录的Android.mk文件中修改:
+
+使用的是LOCAL_CFLAGS，其实就是使用的makefile 的CFLAGS命令参数变量。
+
+定义宏的方法： LOCAL_CFLAGS += -DFLAG_TEST
+
+取消宏定义的方法： LOCAL_CFLAGS += -UFLAG_TEST
+
+
+
+
