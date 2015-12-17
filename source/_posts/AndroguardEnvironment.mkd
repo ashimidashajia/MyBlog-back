@@ -1,0 +1,98 @@
+---
+layout: post
+title: Androguard环境搭建
+categories: App开发
+tags: [逆向工程]
+date: 2015-12-16 23:15:03
+---
+
+
+
+Androguard据说是一款强大的Android Apk静态分析工具。强大到其环境搭建都不是一件容易的事情。
+
+<!--more-->
+
+从Github上下载其最新的源码：[Androguard下载][1].Androguard必须要有Python，并且版本不能低于2.6，且不能高于3.0才能运行，自行安装python吧。
+
+我下载最新稳定版2.0.
+
+
+#### 安装基础依赖
+
+Androguard依赖很多，其官网建议：
+
+```bash
+ sudo apt-get install python-dev python-bzutils libbz2-dev libmuparser-dev libsparsehash-dev python-ptrace python-pygments python-pydot graphviz liblzma-dev libsnappy-dev
+```
+但是我的python-bzutils找不到，所以没安装。
+
+
+#### 用pip来安装magic库：
+
+```bash
+sudo pip install python-magic
+```
+
+#### 源码安装pyfuzzy库:
+
+[源码下载][2],解压后进入其文件夹：
+
+```bash
+tar -zxf pyfuzzy-0.1.0.tar.gz  
+
+cd pyfuzzy-0.1.0  
+
+sudo python setup.py install 
+```
+
+#### 安装chilkat
+
+从其[官网][3]选择合适的版本下载，我的python版本是2.7，且系统是64位ubuntu，所以选择chilkat-9.5.0-python-2.7-x86_64-linux.tar.gz。
+
+安装很简单，解压后：
+```bash
+ sudo cp chilkat.py _chilkat.so /usr/local/lib/python2.7/dist-packages/
+```
+
+
+#### drozer
+
+从github上下载[dorzer][4]
+
+将其文件夹修改未dorzer，然后直接拷贝到Androguard源码根目录,进入其源码目录，直接make即可（前提下载的是完整的git仓库，而不是zip包）。我暂时还没用到它。
+
+
+#### 修改Androguard makefile
+
+打开elsim/elsign/formula/Makefile
+
+```bash
+CFLAGS += -I/usr/include/muParser  
+```
+打开elsim/elsign/libelsign/Makefile
+
+```bash
+CFLAGS += -I/usr/include/muParser -I/usr/include/python2.7 
+```
+
+
+#### 安装交互所需依赖
+
+```bash
+sudo pip install traitlets
+sudo pip install -U jupyter
+```
+
+#### 编译Androguard
+
+在源码根目录直接执行
+
+```bash
+make
+```
+
+[1]: https://github.com/androguard/androguard
+[2]: http://sourceforge.net/projects/pyfuzzy/files/pyfuzzy/pyfuzzy-0.1.0/pyfuzzy-0.1.0.tar.gz
+[3]: http://www.chilkatsoft.com/python.asp
+[4]: https://github.com/mwrlabs/drozer
+

@@ -1,0 +1,229 @@
+---
+layout: post
+title: Androguard常用API学习1
+categories: App开发
+tags: [逆向工程]
+date: 2015-12-17 16:49:25
+---
+
+Androguard 使用文档网上千篇一律，而且也没在其源码中发现有文档，只能通过源码慢慢摸索了。可以写的很乱，买办法，我也是第一次接触。
+
+Androguard 工具中常用的就是androlyze.py：
+
+```bash
+./androlyze.py -s
+```
+
+执行上述命令，即可进入交互模式。
+<!--more-->
+
+### AnalyzeAPK
+
+该API定义在androguard-2.0/androguard/misc.py中
+
+```python
+def AnalyzeAPK(filename, raw=False, decompiler="dad"):
+    """
+        Analyze an android application and setup all stuff for a more quickly analysis !
+
+        :param filename: the filename of the android application or a buffer which represents the application
+        :type filename: string
+        :param raw: True is you would like to use a buffer (optional)
+        :type raw: boolean
+        :param decompiler: ded, dex2jad, dad (optional)
+        :type decompiler: string
+
+        :rtype: return the :class:`APK`, :class:`DalvikVMFormat`, and :class:`VMAnalysis` objects
+    """
+    androconf.debug("APK ...")
+    a = APK(filename, raw)
+    d, dx = AnalyzeDex(a.get_dex(), raw=True, decompiler=decompiler)
+    return a, d, dx
+```
+注释已经清楚的写明了该函数的作用。另外从该函数定义中可以看到其实内部主要调用了APK(),AnalyzeDex()这两个函数，所以当要定制python脚本时，可以仿照该函数使用这两个api。
+
+该函数返回class对象：
+
+```
+class:`APK`, :class:`DalvikVMFormat`, and :class:`VMAnalysis` objects
+```
+所以该API的用法（首先进入交互模式）：
+
+```
+apk,d,dx=AnalyzeAPK("apk路径")
+```
+
+```bash
+androguard-2.0/androguard/core/analysis/analysis.py
+```
+中定义了很多有趣的方法，传递的参数就是AnalyzeAPK函数的三个返回值中的VMAnalysis，也就是dx。
+1). 查看apk申请的权限：
+
+```bash
+apk.get__permissions()
+```
+结果：
+```bash
+In [17]: apk.get_permissions()
+Out[17]: 
+['android.permission.CHANGE_WIFI_STATE',
+ 'android.permission.READ_PHONE_STATE',
+ 'android.permission.ACCESS_NETWORK_STATE',
+ 'android.permission.INTERNET',
+ 'android.permission.WAKE_LOCK',
+ 'android.permission.WRITE_EXTERNAL_STORAGE',
+ 'android.permission.SYSTEM_ALERT_WINDOW',
+ 'android.permission.ACCESS_FINE_LOCATION',
+ 'android.permission.GET_TASKS',
+ 'android.permission.WAKE_LOCK',
+ 'android.permission.ACCESS_WIFI_STATE']
+
+```
+2) 获取SDK api版本：
+
+```bash
+In [78]: d.get_api_version()
+Out[78]: 19
+```
+
+3)查看对应权限的使用点:
+
+```bash
+show_Permissions(dx)
+```
+
+4). 获得包名
+
+```bash
+In [42]: apk.get_package()
+Out[42]: u'com.dxjxrr'
+```
+
+5).dex相关解析
+
+利用返回DalvikVMFormat对象d,可以查看源码：
+
+格式：
+```bash
+d.CLASS_L类全名.METHOD_方法名.source()
+```
+
+例如：
+
+```bash
+In [40]: d.CLASS_Lcom_tencent_StubShell_TxAppEntry.METHOD_getSoVersion.source()
+DEBUG: Parsing instructions
+DEBUG: Parsing exceptions
+DEBUG: Creating basic blocks in Lcom/tencent/StubShell/TxAppEntry;->getSoVersion()Ljava/lang/String; [access_flags=private]
+DEBUG: Settings basic blocks childs
+DEBUG: Creating exceptions
+private String getSoVersion()
+    {
+        return "0.0.0";
+    }
+```
+实际上DalvikVMFormat就是对dex文件的抽象而已。利用下面的命令，可以查看dex中定义的字符串
+
+```bash
+In [45]: d.get_strings()
+Out[45]: 
+['',
+ ' ',
+ '.so',
+ '/',
+ '/data/data/',
+ '/system/lib64',
+ '/tx_shell',
+ '/tx_shell/',
+ '0.0.0',
+ '4e885a73d257f3159aa254a7caf2df46c8fd0e1cacb11f64de249f34b31a6736',
+ '<clinit>',
+ '<init>',
+ 'CPU_ABI',
+ 'I',
+ 'IL',
+ 'ILL',
+ 'ILLL',
+ 'L',
+ 'LL',
+
+```
+
+熟悉dex格式的朋友，当然会猜测出DlvikVMFormat应该还会提供其他获取dex内容信息的函数,具体可以查看：
+
+```bash
+androguard-2.0/androguard/core/bytecodes/dvm.py
+```
+DlvikVMFormat就定义在该文件中，而且dex文件中的相关数据都可以在dvm.py找到对其的python类定义，比如StringIdItem，TypeIdItem，ProtoIdItem，FieldIdItem，MethodIdItem，ClassDefItem，ClassDataItem等等。
+
+通过DlvikVMFormat提供的接口，拿到这些类的对象，然后就可以通过这些python类提供的方法，查看dex相关信息了。
+
+
+ dex header 也会对应一个python类HeaderItem，获取header:
+
+```bash
+In [92]: h=d.get_header_item()
+
+In [93]: h.show()
+########## Header Item
+magic=14974455192773988, checksum=609280917, signature=�c� CMōnf�\
+file_size=a10f8, header_size=70, endian_tag=12345678
+link_size=0, link_off=0
+map_off=20b8
+string_ids_size=b7, string_ids_off=70
+type_ids_size=21, type_ids_off=34c
+proto_ids_size=1b, proto_ids_off=3d0
+field_ids_size=16, field_ids_off=514
+method_ids_size=3c, method_ids_off=5c4
+class_defs_size=2, class_defs_off=7a4
+data_size=198c, data_off=7e4
+
+```
+
+查看dex中包含哪些类：
+
+```bash
+In [46]: d.get_classes_names()
+Out[46]: ['Lcom/tencent/StubShell/TxAppEntry;', 'Lcom/tencent/StubShell/ZipUtil;']
+```
+
+dvm.py提供了几乎所有解析dex的操作，以后用到什么，就来这里查就可以了。
+
+6)获得方法调用关系
+
+```bash
+In [130]: d.CLASS_Lcom_tencent_StubShell_TxAppEntry.METHOD_runCreate.show_xref()
+########## XREF
+F: Lcom/tencent/StubShell/TxAppEntry; onCreate ()V 0
+####################
+
+```
+
+7).解析AndroidManifest.xml
+
+apk类定义在
+```
+androguard-2.0/androguard/core/bytecodes/apk.py
+```
+查看服务
+```bash
+
+In [139]: for i in xml.getElementsByTagName('service'):
+    print i.toxml()
+   .....:     
+<service android:name="com.dxjxrr.foreign.FTPServerService">
+</service>
+<service android:name="org.jufh.xmvo.woeiwej.ASxx">
+</service>
+<service android:name="com.settingsactivity">
+</service
+```
+包括查看前面提到的SDK  api版本等等
+
+8).获取apk的入口
+
+```bash
+In [140]: apk.get_main_activity()
+Out[140]: u'com.dxjxrr.WiFiActivity
+```
+
