@@ -1,0 +1,90 @@
+
+---
+layout: post
+title: 初探boot.art与boot.oat
+categories: Android底层开发
+tags: [逆向开发]
+date: 2015-12-19 01:28:32
+---
+
+boot.art与boot.oat与其说是ART虚拟机的两种执行格式，不如说他俩就是ART虚拟机的一部分！！！ART离开了这两个文件，也就无法启动了。
+
+<!--more-->
+
+boot.art是一个img文件，而boot.oat文件可以将其理解为ART虚拟机的启动类。
+
+### 前世今生
+
+这两个文件是dex2oat命令将Android系统必须的的jar包编译生成的，这两个文件相互联系，缺一不可，boot.art这个img文件直接被映射到ART虚拟机的堆空间中，包含了boot.oat中的某些对象实例以及函数地址。
+
+
+可以通过分析编译Android源码时产生的日志，到底是由哪些文件生成的这两个文件，但是这样挺麻烦的，最简单的办法就是将：
+
+```
+/data/dalvik-cache/arm或者arm64中的boot.art和boot.oat删除
+```
+
+然后重启手机，抓取log
+
+```bash
+adb logcat | grep dex2oat
+```
+就可以看到如下图所示：
+
+
+![][1]
+
+--image和--oat-file指定的选项是用来生成文件的，而--dex-file用来指定要被编译的dalvik的dex文件,可以看出它是由多个dex文件生成的。
+
+boot.oat和boot.art文件依赖的dalvik的dex来自于BOOTCLASSPATH中指定的jar包。
+
+![][2]
+
+
+这些都是Android系统的基础jar包，也包括了java的核心jar包。
+
+还要注 --image--classes选项指定的/system/etc/preload –classes与zygote启动的时候预加载的类资源是一致的。boot.art这个img会加速zygote预加载类的速度。
+
+
+
+### 千丝万缕
+
+boot.art与boot.oat从名字上似乎就暗示了两者之间亲密的关系。在ART启动的时候，首先加载boot.art，然后加载boot.oat.
+
+
+boot.art img文件对应的定义在
+```
+art/runtime/Image.h
+```
+
+![][3]
+
+
+boot.art文件包含一些特殊的函数，这些函数会在ART虚拟机初始化image空间的时候，将其地址赋给相应的变量中。这些函数在ART解析函数调用的时候会用到。
+
+
+Image roots中的元素都很重要。DexCache和Classroot 再后面介绍ART如何启动的时候，在详谈。
+
+通俗的理解，boot.art包含了启动类加载后的类对象，启动时以直接被载入进程空间中。可以缩短ART虚拟机启动时间。
+
+boot.art的img header中指明了boot.oat加载的位置oat begin.只要boot.oat加载到了这里，那么两者算相当于合体了，这样两者之间互有引用的东东，便可以轻而易举的建立联系了。
+
+
+### 举足轻重
+
+另外值得一提的是，只要重新生成两者，都会导致ART虚拟机重新编译生成所有的dex文件，开机时间相对漫长。
+
+这是因为dex2oat命令在将Apk或者jar包中的Dalvik 字节码dex文件转换为ART的后缀为dex的oat文件的时候，会记录boot.oat和boot.art在虚拟机中的位置偏移量，这样这些oat文件在ART中运行的时候
+就可以轻松的找到boot.art和boot.oat中加载的java和Android核心类了。
+
+重新生成这两个文件，其在内存中的偏移量一般都会发生变化，这样自然导致之前生成的oat文件都失效了。。。。。。。。。。。。
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/art-2.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/art-3.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/art-4.png
+
+
+
+
+
+

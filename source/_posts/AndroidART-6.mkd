@@ -1,0 +1,331 @@
+---
+layout: post
+title: ART虚拟机启动之image空间
+categories: Android底层开发
+tags: [逆向开发]
+date: 2015-12-20 20:38:16
+---
+
+ART虚拟机是由app_process负责启动的，只有启动了虚拟机，Android系统才能开始运行java程序，才能跨入java世界。
+
+
+<!--more-->
+
+
+### app_process
+
+源码位置：
+
+```bash
+framework/base/cmds/app_process/app_main.cpp
+```
+
+app_process可执行程序十分重要，负责启动ART虚拟机，Zygote和systemServer.关于app_process可以查看我之前关于Zygote进程启动的分析。
+
+
+
+
+### ART启动
+
+
+源码位置：
+
+```bash
+framework/base/cmds/app_process/app_main.cpp
+
+frameworks/base/core/jni/AndroidRuntime.cpp
+
+art/runtime/jni_internal.cc
+
+```
+
+启动简要流程如下(最好能根据流程吧源码看上一遍)：
+
+![][1]
+
+![][2]
+
+
+首先AndroidRuntime::start函数中会进行jni的初始化，实际上就是加载虚拟机的so库，并从中导出三个函数，其中JNI_CreateJavaVM用来启动虚拟机。Android 5.0之后默认加载的就是libart.so。
+
+
+JNI_CreateJavaVM主要负责创建ART虚拟机实例，并且启动ART虚拟机，然后给app_process返回JNIEnv和JavaVM。有了JNIEnv，app_process中才能使用JNI中的FindClass等函数。
+
+
+创建虚拟机实例中，最主要的是Runtime::init函数，负责创建虚拟机堆空间，绑定Thread，创建和初始化classLinker。
+
+
+利用gc::Heap创建堆空间时，主要有两件事情，加载boot.ar和boot.oat初始化imgae空间，另外就是与垃圾回收机制相关的东东（垃圾回收太复杂了，暂时略过，后面详谈）。
+
+
+要加载boot.art和boot.oat，那么就要首先找到他们。
+
+源码位置：
+
+```bash
+art/runtime/gc/space/image_space.cc
+```
+```c++
+bool ImageSpace::FindImageFilename(const char* image_location,
+                                   const InstructionSet image_isa,
+                                   std::string* system_filename,
+                                   bool* has_system,
+                                   std::string* cache_filename,
+                                   bool* dalvik_cache_exists,
+                                   bool* has_cache,
+                                   bool* is_global_cache) {
+  *has_system = false;
+  *has_cache = false;
+  // image_location = /system/framework/boot.art
+  // system_image_location = /system/framework/<image_isa>/boot.art
+  std::string system_image_filename(GetSystemImageFilename(image_location, image_isa));
+  if (OS::FileExists(system_image_filename.c_str())) {
+    *system_filename = system_image_filename;
+    *has_system = true;
+  }
+
+  bool have_android_data = false;
+  *dalvik_cache_exists = false;
+  std::string dalvik_cache;
+  GetDalvikCache(GetInstructionSetString(image_isa), true, &dalvik_cache,
+                 &have_android_data, dalvik_cache_exists, is_global_cache);
+
+  if (have_android_data && *dalvik_cache_exists) {
+    // Always set output location even if it does not exist,
+    // so that the caller knows where to create the image.
+    //
+    // image_location = /system/framework/boot.art
+    // *image_filename = /data/dalvik-cache/<image_isa>/boot.art
+    std::string error_msg;
+    if (!GetDalvikCacheFilename(image_location, dalvik_cache.c_str(), cache_filename, &error_msg)) {
+      LOG(WARNING) << error_msg;
+      return *has_system;
+    }
+    *has_cache = OS::FileExists(cache_filename->c_str());
+  }
+  return *has_system || *has_cache;
+}
+```
+
+该函数会首先在
+```bash
+ /system/framework/<image_isa>/boot.art
+```
+找，然后再在
+
+```bash
+/data/dalvik-cache/<image_isa>/boot.art
+```
+找，最后将结果通过返回值和传进来的参数返回。
+
+
+在Heap创建ImageSpace的时候会调用上面的函数：
+```c++
+ImageSpace* ImageSpace::Create(const char* image_location,
+                               const InstructionSet image_isa,
+                               std::string* error_msg) {
+
+.................................
+  const bool found_image = FindImageFilename(image_location, image_isa, &system_filename,
+                                             &has_system, &cache_filename, &dalvik_cache_exists,
+                                             &has_cache, &is_global_cache
+................................
+ if (found_image) {
+    const std::string* image_filename;
+    bool is_system = false;
+    bool relocated_version_used = false;
+    if (relocate) {
+      if (!dalvik_cache_exists) {
+        *error_msg = StringPrintf("Requiring relocation for image '%s' at '%s' but we do not have "
+                                  "any dalvik_cache to find/place it in.",
+                                  image_location, system_filename.c_str());
+        return nullptr;
+      }
+      if (has_system) {
+        if (has_cache && ChecksumsMatch(system_filename.c_str(), cache_filename.c_str())) {
+          // We already have a relocated version
+          image_filename = &cache_filename;
+          relocated_version_used = true;
+        } else {
+          // We cannot have a relocated version, Relocate the system one and use it.
+
+          std::string reason;
+          bool success;
+
+          // Check whether we are allowed to relocate.
+          if (!can_compile) {
+            reason = "Image dex2oat disabled by -Xnoimage-dex2oat.";
+            success = false;
+          } else if (!ImageCreationAllowed(is_global_cache, &reason)) {
+            // Whether we can write to the cache.
+            success = false;
+          } else {
+            // Try to relocate.
+            success = RelocateImage(image_location, cache_filename.c_str(), image_isa, &reason);
+          }
+
+          if (success) {
+            relocated_version_used = true;
+            image_filename = &cache_filename;
+          } else {
+            *error_msg = StringPrintf("Unable to relocate image '%s' from '%s' to '%s': %s",
+                                      image_location, system_filename.c_str(),
+                                      cache_filename.c_str(), reason.c_str());
+            // We failed to create files, remove any possibly garbage output.
+            // Since ImageCreationAllowed was true above, we are the zygote
+            // and therefore the only process expected to generate these for
+            // the device.
+            PruneDalvikCache(image_isa);
+            return nullptr;
+          }
+        }
+      } else {
+        CHECK(has_cache);
+        // We can just use cache's since it should be fine. This might or might not be relocated.
+        image_filename = &cache_filename;
+      }
+    } else {
+      if (has_system && has_cache) {
+        // Check they have the same cksum. If they do use the cache. Otherwise system.
+        if (ChecksumsMatch(system_filename.c_str(), cache_filename.c_str())) {
+          image_filename = &cache_filename;
+          relocated_version_used = true;
+        } else {
+          image_filename = &system_filename;
+          is_system = true;
+        }
+      } else if (has_system) {
+        image_filename = &system_filename;
+        is_system = true;
+      } else {
+        CHECK(has_cache);
+        image_filename = &cache_filename;
+      }
+    }
+    {
+      // Note that we must not use the file descriptor associated with
+      // ScopedFlock::GetFile to Init the image file. We want the file
+      // descriptor (and the associated exclusive lock) to be released when
+      // we leave Create.
+      ScopedFlock image_lock;
+      image_lock.Init(image_filename->c_str(), error_msg);
+      VLOG(startup) << "Using image file " << image_filename->c_str() << " for image location "
+                    << image_location;
+      // If we are in /system we can assume the image is good. We can also
+      // assume this if we are using a relocated image (i.e. image checksum
+      // matches) since this is only different by the offset. We need this to
+      // make sure that host tests continue to work.
+      space = ImageSpace::Init(image_filename->c_str(), image_location,
+                               !(is_system || relocated_version_used), error_msg);
+    }
+    if (space != nullptr) {
+      return space;
+    }
+
+................................
+}
+```
+ImageSpace::create逻辑很简单，就是先找boot.art和boot.oat.看他们存在与否。如果存在的话，是在/system/framework中呢，还是在/data/dalvik-cache中。
+
+
+1). 如果找到了boot.art
+
+接着判断是否需要对boot.art在内存中的位置重定位，这个是有relocate来判断的。默认情况下，ART虚拟机启动的时候是必须要重定位boot.art的，但是可以通过在ART虚拟机启动的时候，添加在参数“-Xnorelocate”来禁止重定位。
+
+先看需要重定位的情况：
+
+此情况下，如果boot.art是在/data/dalvik-cache里的话，那就说明是已经重定位过了，如果/data/dalvik-cache没有，而是在/system/framework里的话，那么就需要对其进行重定位。
+
+接着就调用RelocateImage对其重定位。该函数实际上是调用patchoat可执行程序对boot.oat和boot.art进行重定位。重定位之后新的boot.art和boot.art会存放在/data/dalvik-cache中。
+
+
+不需要重定位：
+
+此情况下，如果system和data中都有boot.art和boot.oat，倘若两者cksum一致，就使用/data/dalvik-cache中的，否则就使用/system/framework中的。如果system和data中只有其一有，那么谁有，就用谁的。
+
+2). 如果没找到boot.art
+
+没找到的话，那就利用GenerateImage函数自己创建，实际上该函数就是调用dex2oat命令将BOOTCLASSPATH中中的jar编译为boot.art和boot.oat。这里要注意的话，该函数生成的是重定位过后的boot.art和boot.oat.
+
+
+
+有了boot.art和boot.oat之后，就调用 ImageSpace::Init初始化image空间。
+
+```c++
+
+ImageSpace* ImageSpace::Init(const char* image_filename, const char* image_location,
+                             bool validate_oat_file, std::string* error_msg) {
+
+................
+
+space->oat_file_.reset(space->OpenOatFile(image_filename, error_msg));
+  if (space->oat_file_.get() == nullptr) {
+    DCHECK(!error_msg->empty());
+    return nullptr;
+  }
+
+  if (validate_oat_file && !space->ValidateOatFile(error_msg)) {
+    DCHECK(!error_msg->empty());
+    return nullptr;
+  }
+
+  Runtime* runtime = Runtime::Current();
+  runtime->SetInstructionSet(space->oat_file_->GetOatHeader().GetInstructionSet());
+
+  mirror::Object* resolution_method = image_header.GetImageRoot(ImageHeader::kResolutionMethod);
+  runtime->SetResolutionMethod(down_cast<mirror::ArtMethod*>(resolution_method));
+  mirror::Object* imt_conflict_method = image_header.GetImageRoot(ImageHeader::kImtConflictMethod);
+  runtime->SetImtConflictMethod(down_cast<mirror::ArtMethod*>(imt_conflict_method));
+  mirror::Object* imt_unimplemented_method =
+      image_header.GetImageRoot(ImageHeader::kImtUnimplementedMethod);
+  runtime->SetImtUnimplementedMethod(down_cast<mirror::ArtMethod*>(imt_unimplemented_method));
+  mirror::Object* default_imt = image_header.GetImageRoot(ImageHeader::kDefaultImt);
+  runtime->SetDefaultImt(down_cast<mirror::ObjectArray<mirror::ArtMethod>*>(default_imt));
+
+  mirror::Object* callee_save_method = image_header.GetImageRoot(ImageHeader::kCalleeSaveMethod);
+  runtime->SetCalleeSaveMethod(down_cast<mirror::ArtMethod*>(callee_save_method),
+                               Runtime::kSaveAll);
+  callee_save_method = image_header.GetImageRoot(ImageHeader::kRefsOnlySaveMethod);
+  runtime->SetCalleeSaveMethod(down_cast<mirror::ArtMethod*>(callee_save_method),
+                               Runtime::kRefsOnly);
+  callee_save_method = image_header.GetImageRoot(ImageHeader::kRefsAndArgsSaveMethod);
+  runtime->SetCalleeSaveMethod(down_cast<mirror::ArtMethod*>(callee_save_method),
+                               Runtime::kRefsAndArgs);
+
+  if (VLOG_IS_ON(heap) || VLOG_IS_ON(startup)) {
+    LOG(INFO) << "ImageSpace::Init exiting (" << PrettyDuration(NanoTime() - start_time)
+             << ") " << *space.get();
+  }
+  return space.release();
+}
+```
+
+boot.art是img文件，直接映射到内存空间，下图所示Image Roots中的内容，就可以被使用了。
+
+![][3]
+
+boot.oat是一个oat文件，和前面《ART可执行文件oat解析》几乎一样了。
+
+
+### 为何需要对boot.art与boot.oat重定位
+
+
+重定位的意思重定位其加载到内存中的位置。Android源码中指定了一个base地址作为其加载到内存的默认地址，如果不重定位的话，会导致使用这个ROM的Android 设备image空间起始地址都一样，这容易被攻击。所以就需要重定位。
+
+一般情况下，/data/dalvik-cache中的boot.art和boot.oat都是经过重定位的。/system/frmework中的是没有经过重定位的。重定位其实很简单，就是在一定范围内产生一个随机数，然后实际加载地址是base+这个随机数。
+
+
+
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/art-11.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/art-12.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/art-4.png
+
+
+
+
+
+
+
+

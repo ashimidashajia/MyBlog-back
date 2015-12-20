@@ -1,0 +1,130 @@
+---
+layout: post
+title: ART可执行文件oat解析
+categories: Android底层开发
+tags: [逆向开发]
+date: 2015-12-19 15:04:34
+---
+
+前面简单的介绍了ART的可执行文件有三种：.art(是一个img文件不能单独运行);.oat;.dex.他们都是由dex2oat可执行程序以Dalvik的dex文件为原料加工得来的。而且.oat和.dex是elf文件，实际上.oat和.dex内部格式一样，只是后缀不一样罢了。
+
+利用readelf命令可以看出ART的elf的特别之处：
+
+![][4]
+
+多了三个特别的符号。
+
+<!--more-->
+
+### oat文件格式
+
+下图所示是ART可执行文件的格式：
+
+![][1]
+
+
+ART的oat文件是一个特殊的elf文件，其内部oatdata与oatlastword之间的数据才是真正的oat的文件，如上图所示。
+
+从图中也可以看出oat文件中内嵌了Dalvik的dex文件，而且oat文件原生支持内嵌多个Dalvik的dex文件，在oat的header中有字段记录了该oat文件中包含有几个dex文件。
+
+一般情况下，boot.oat包含了多个dex文件，普通的app的oat文件通常只有一个dex文件。
+
+oatclass描述dex中的class,一一对应。oatclass记录了method的本地机器指令。
+
+源码位置：
+
+```bash
+art/runtime/oat.h
+art/runtime/oat.c
+```
+
+### oat文件的加载
+
+源码位置：
+
+```bash
+art/runtime/Oat_file.cc
+```
+![][2]
+
+思路也很清晰，首先加载elf文件，然后以oatdata和oatlastword找到真正的oat文件。接着解析oat header,根据其中的信息解析oat文件余下的部分。例如装载Dalvik的dex文件等。
+
+这里要注意，ART中利用OatDexFile类来标示Dalvik的dex，但实际上该类还是会调用DexFile类，如下图所示。
+
+
+![][3]
+
+
+OatDexFile类中也记录了该Dalvik dex文件中的class对应的oatclass的位置。
+
+
+
+### boot.oat与app的oat文件区别
+
+
+
+前面已经说过了，dex2oat在生成app的oat文件的时候，是会记录boot.oat在内存中的位置的。那么就意味着只要不在重新生成boot.oat，那么他被加载到了内存中的位置，便是固定的，不能随便加载。
+
+从源码中也是可以看出这一点的。
+
+首先看看这两类oat文件的区别：
+
+![][5]
+
+上图中的boot.oat和calculator.dex均提取自运行Android 5.0以上系统的设备，为了便于使用，我也修改了他们的名字。
+
+从图中可以看到程序头表中的第一项LOAD的区别了。对于boot.oat来说其第一项LOAD是不为0的，而对于App的oat文件来说，第一项LOAD是为0的。
+
+源码位置：
+
+```bash
+
+art/runtime/ELF_file.cc
+```
+看下面装载elf文件的load函数：
+```c++
+bool ElfFile::Load(bool executable, std::string* error_msg) {
+  CHECK(program_header_only_) << file_->GetPath();
+
+..............................................................................
+    if (!reserved) {
+      uint8_t* reserve_base = reinterpret_cast<uint8_t*>(program_header->p_vaddr);
+      uint8_t* reserve_base_override = reserve_base;
+      // Override the base (e.g. when compiling with --compile-pic)
+      if (requested_base_ != nullptr) {
+        reserve_base_override = requested_base_;
+      }
+      std::string reservation_name("ElfFile reservation for ");
+      reservation_name += file_->GetPath();
+      std::unique_ptr<MemMap> reserve(MemMap::MapAnonymous(reservation_name.c_str(),
+                                                           reserve_base_override,
+                                                           GetLoadedSize(), PROT_NONE, false,
+                                                           error_msg));
+.................................................................................
+}
+```
+MapAnonymous函数的第二个参数就是映射到内存的起始位置，不指定的话，就有系统分配了，boot.oat是指定了的！！！
+
+总的来说：
+
+1）oat文件其实是包含在一个elf文件中的，符号oatdata和oatlastword分别指定了oat文件在elf文件中的头和尾的位置，符号oatexec指向可执行段的位置；
+
+2）boot.oat是要被加载到一个固定的地址上的，紧挨着boot.art之后。而对于app的oat文件来说，可以被加载到内存中的任何位置；
+
+3）oat文件内部包含了若干完整的dex文件。
+
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/art-5.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/art-6.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/art-7.png
+[4]: http://7xj6ce.com1.z0.glb.clouddn.com/art-8.png
+[5]: http://7xj6ce.com1.z0.glb.clouddn.com/art-9.png
+
+
+
+
+
+
+
+

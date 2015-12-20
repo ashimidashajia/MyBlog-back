@@ -1,0 +1,179 @@
+
+---
+layout: post
+title: ART虚拟机启动之classlinker
+categories: Android底层开发
+tags: [逆向开发]
+date: 2015-12-20 23:58:05
+---
+
+
+classlinker是加载java类的重要组件，他的创建与初始化也是ART虚拟机的重要任务之一。
+
+<!--more-->
+
+如下图所示，是classlinker的启动流程：
+
+![][1]
+
+从中可以看出它使用了image空间中加载的boot.oat.因为boot.oat是有BOOTCLASSPATH中的jar包生成的，里面包含了JAVA核心类和Android系统的核心类。classlinker需要从中得到这些核心的jar包中包含的内容。
+
+
+源码位置：
+
+```bash
+art/runtime/Class_linker.cc
+```
+
+其中InitFromImage函数如下所示：
+```c++
+void ClassLinker::InitFromImage() {
+  VLOG(startup) << "ClassLinker::InitFromImage entering";
+  CHECK(!init_done_);
+
+  Thread* self = Thread::Current();
+  gc::Heap* heap = Runtime::Current()->GetHeap();
+  gc::space::ImageSpace* space = heap->GetImageSpace();
+  dex_cache_image_class_lookup_required_ = true;
+  CHECK(space != nullptr);
+  OatFile& oat_file = GetImageOatFile(space);
+  CHECK_EQ(oat_file.GetOatHeader().GetImageFileLocationOatChecksum(), 0U);
+  CHECK_EQ(oat_file.GetOatHeader().GetImageFileLocationOatDataBegin(), 0U);
+  const char* image_file_location = oat_file.GetOatHeader().
+      GetStoreValueByKey(OatHeader::kImageLocationKey);
+  CHECK(image_file_location == nullptr || *image_file_location == 0);
+  portable_resolution_trampoline_ = oat_file.GetOatHeader().GetPortableResolutionTrampoline();
+  quick_resolution_trampoline_ = oat_file.GetOatHeader().GetQuickResolutionTrampoline();
+  portable_imt_conflict_trampoline_ = oat_file.GetOatHeader().GetPortableImtConflictTrampoline();
+  quick_imt_conflict_trampoline_ = oat_file.GetOatHeader().GetQuickImtConflictTrampoline();
+  quick_generic_jni_trampoline_ = oat_file.GetOatHeader().GetQuickGenericJniTrampoline();
+  quick_to_interpreter_bridge_trampoline_ = oat_file.GetOatHeader().GetQuickToInterpreterBridge();
+  mirror::Object* dex_caches_object = space->GetImageHeader().GetImageRoot(ImageHeader::kDexCaches);
+  mirror::ObjectArray<mirror::DexCache>* dex_caches =
+      dex_caches_object->AsObjectArray<mirror::DexCache>();
+
+  StackHandleScope<1> hs(self);
+  Handle<mirror::ObjectArray<mirror::Class>> class_roots(hs.NewHandle(
+          space->GetImageHeader().GetImageRoot(ImageHeader::kClassRoots)->
+          AsObjectArray<mirror::Class>()));
+  class_roots_ = GcRoot<mirror::ObjectArray<mirror::Class>>(class_roots.Get());
+
+  // Special case of setting up the String class early so that we can test arbitrary objects
+  // as being Strings or not
+  mirror::String::SetClass(GetClassRoot(kJavaLangString));
+
+  CHECK_EQ(oat_file.GetOatHeader().GetDexFileCount(),
+           static_cast<uint32_t>(dex_caches->GetLength()));
+  for (int32_t i = 0; i < dex_caches->GetLength(); i++) {
+    StackHandleScope<1> hs(self);
+    Handle<mirror::DexCache> dex_cache(hs.NewHandle(dex_caches->Get(i)));
+    const std::string& dex_file_location(dex_cache->GetLocation()->ToModifiedUtf8());
+    const OatFile::OatDexFile* oat_dex_file = oat_file.GetOatDexFile(dex_file_location.c_str(),
+                                                                     nullptr);
+    CHECK(oat_dex_file != nullptr) << oat_file.GetLocation() << " " << dex_file_location;
+    std::string error_msg;
+    const DexFile* dex_file = oat_dex_file->OpenDexFile(&error_msg);
+    if (dex_file == nullptr) {
+      LOG(FATAL) << "Failed to open dex file " << dex_file_location
+                 << " from within oat file " << oat_file.GetLocation()
+                 << " error '" << error_msg << "'";
+    }
+
+    CHECK_EQ(dex_file->GetLocationChecksum(), oat_dex_file->GetDexFileLocationChecksum());
+
+    AppendToBootClassPath(*dex_file, dex_cache);
+  }
+
+  // Set classes on AbstractMethod early so that IsMethod tests can be performed during the live
+  // bitmap walk.
+  mirror::ArtMethod::SetClass(GetClassRoot(kJavaLangReflectArtMethod));
+  size_t art_method_object_size = mirror::ArtMethod::GetJavaLangReflectArtMethod()->GetObjectSize();
+  if (!Runtime::Current()->IsCompiler()) {
+    // Compiler supports having an image with a different pointer size than the runtime. This
+    // happens on the host for compile 32 bit tests since we use a 64 bit libart compiler. We may
+    // also use 32 bit dex2oat on a system with 64 bit apps.
+    CHECK_EQ(art_method_object_size, mirror::ArtMethod::InstanceSize(sizeof(void*)))
+        << sizeof(void*);
+  }
+  if (art_method_object_size == mirror::ArtMethod::InstanceSize(4)) {
+    image_pointer_size_ = 4;
+  } else {
+    CHECK_EQ(art_method_object_size, mirror::ArtMethod::InstanceSize(8));
+    image_pointer_size_ = 8;
+  }
+
+  // Set entry point to interpreter if in InterpretOnly mode.
+  if (Runtime::Current()->GetInstrumentation()->InterpretOnly()) {
+    ReaderMutexLock mu(self, *Locks::heap_bitmap_lock_);
+    heap->VisitObjects(InitFromImageInterpretOnlyCallback, this);
+  }
+
+  // reinit class_roots_
+  mirror::Class::SetClassClass(class_roots->Get(kJavaLangClass));
+  class_roots_ = GcRoot<mirror::ObjectArray<mirror::Class>>(class_roots.Get());
+
+  // reinit array_iftable_ from any array class instance, they should be ==
+  array_iftable_ = GcRoot<mirror::IfTable>(GetClassRoot(kObjectArrayClass)->GetIfTable());
+  DCHECK_EQ(array_iftable_.Read(), GetClassRoot(kBooleanArrayClass)->GetIfTable());
+  // String class root was set above
+  mirror::Reference::SetClass(GetClassRoot(kJavaLangRefReference));
+  mirror::ArtField::SetClass(GetClassRoot(kJavaLangReflectArtField));
+  mirror::BooleanArray::SetArrayClass(GetClassRoot(kBooleanArrayClass));
+  mirror::ByteArray::SetArrayClass(GetClassRoot(kByteArrayClass));
+  mirror::CharArray::SetArrayClass(GetClassRoot(kCharArrayClass));
+  mirror::DoubleArray::SetArrayClass(GetClassRoot(kDoubleArrayClass));
+  mirror::FloatArray::SetArrayClass(GetClassRoot(kFloatArrayClass));
+  mirror::IntArray::SetArrayClass(GetClassRoot(kIntArrayClass));
+  mirror::LongArray::SetArrayClass(GetClassRoot(kLongArrayClass));
+  mirror::ShortArray::SetArrayClass(GetClassRoot(kShortArrayClass));
+  mirror::Throwable::SetClass(GetClassRoot(kJavaLangThrowable));
+  mirror::StackTraceElement::SetClass(GetClassRoot(kJavaLangStackTraceElement));
+
+  FinishInit(self);
+
+  VLOG(startup) << "ClassLinker::InitFromImage exiting";
+}
+
+```
+
+该函数意图也很明显，就是通过boot.oat找到boot.art，将其空间中的函数到出来：
+
+```c++
+ portable_resolution_trampoline_ = oat_file.GetOatHeader().GetPortableResolutionTrampoline();
+  quick_resolution_trampoline_ = oat_file.GetOatHeader().GetQuickResolutionTrampoline();
+  portable_imt_conflict_trampoline_ = oat_file.GetOatHeader().GetPortableImtConflictTrampoline();
+  quick_imt_conflict_trampoline_ = oat_file.GetOatHeader().GetQuickImtConflictTrampoline();
+  quick_generic_jni_trampoline_ = oat_file.GetOatHeader().GetQuickGenericJniTrampoline();
+  quick_to_interpreter_bridge_trampoline_ = oat_file.GetOatHeader().GetQuickToInterpreterBridge();
+```
+
+这些函数将在ART执行本地指令时要用到！！！后面详谈！
+
+然后找到boot.oat中的dex与dexcache，每个dex都会对应一个dexcache，这些dexcache存储在boot.art中。
+
+最后在找到java核心类的class：
+
+```c++
+mirror::Reference::SetClass(GetClassRoot(kJavaLangRefReference));
+  mirror::ArtField::SetClass(GetClassRoot(kJavaLangReflectArtField));
+  mirror::BooleanArray::SetArrayClass(GetClassRoot(kBooleanArrayClass));
+  mirror::ByteArray::SetArrayClass(GetClassRoot(kByteArrayClass));
+  mirror::CharArray::SetArrayClass(GetClassRoot(kCharArrayClass));
+  mirror::DoubleArray::SetArrayClass(GetClassRoot(kDoubleArrayClass));
+  mirror::FloatArray::SetArrayClass(GetClassRoot(kFloatArrayClass));
+  mirror::IntArray::SetArrayClass(GetClassRoot(kIntArrayClass));
+  mirror::LongArray::SetArrayClass(GetClassRoot(kLongArrayClass));
+  mirror::ShortArray::SetArrayClass(GetClassRoot(kShortArrayClass));
+  mirror::Throwable::SetClass(GetClassRoot(kJavaLangThrowable));
+  mirror::StackTraceElement::SetClass(GetClassRoot(kJavaLangStackTraceElement));
+```
+
+说白了，初始化classlinker就是从boot.art中拿出事先创建好的东东。
+
+![][2]
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/art-12.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/art-4.png
+
+
+

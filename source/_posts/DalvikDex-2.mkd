@@ -1,0 +1,73 @@
+
+---
+layout: post
+title: App运行时字段或者方法数目超过65535原因分析
+categories: Android底层开发
+tags: [逆向开发]
+date: 2015-12-18 23:55:10
+---
+
+
+我不做app开发，所以这里只是提出65535的原因，至于如何解决，网上一大堆方案了。
+
+<!--more-->
+
+### dx工具的隐患
+
+dx命令是Android sdk提供的一个将javac编译生成的class文件转换为Dalvik可执行的dex文件。
+
+dx工具会去除冗余信息，并把所有的.class文件整合到一个.dex文件中。减少了I/O操作，提高了类的查找速度。
+
+![][1]
+
+这样做可能导致字段或者方法数目超过65535，特别是当引入大量第三方库的时候。
+
+
+
+### 根本原因
+
+上面提到只是表面罢了，实际上根本原因是由dalvik指令集本身限制引起的。
+
+
+google官网介绍[dalvik-bytecode][2]中，有如下片段：
+
+![][3]
+
+很明了了，方法索引是用16bit标示的，也就是最大65535了，字段同理。
+
+
+在[介绍Dalvik指令格式][6]中，invoke-kind对应的指令格式：
+
+![][5]
+
+结合前面文章的例子：
+
+![][4]
+
+上图红色方框中数据为0x1070 0x0003，对应二进制：
+
+```
+0001 0000 0111 0000
+
+0000 0000 0000 0011
+```
+很明显对应
+```
+[A=1] op {vC}, kind@BBBB
+```
+也与我们dex文件中的
+```
+ invoke-direct {v0}, java.lang.Object.<init>:()V 
+```
+相吻合。
+
+
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/de-8.png
+[2]: http://source.android.com/devices/tech/dalvik/dalvik-bytecode.html
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/dx-9.png
+[4]: http://7xj6ce.com1.z0.glb.clouddn.com/dx-10.png
+[5]: http://7xj6ce.com1.z0.glb.clouddn.com/dx-11.png
+[6]: http://source.android.com/devices/tech/dalvik/instruction-formats.html
+

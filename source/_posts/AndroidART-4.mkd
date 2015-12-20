@@ -1,0 +1,85 @@
+---
+layout: post
+title: ART运行普通java程序
+categories: Android底层开发
+tags: [逆向开发]
+date: 2015-12-19 16:52:30
+---
+
+就算是最简单的Android "Hello world"  App程序，其中也夹杂了很多Android东东，不利于我们分析oat文件，所以就产生了能否直接让ART运行普通java程序的念头。ART毕竟是一个java虚拟机嘛，肯定能运行普通java程序了。
+
+<!--more-->
+
+只要是看过app_process程序源码或者ART虚拟机源码的同行们，肯定立即就能想到至少有两种方法可以达到直接运行普通java程序的目的了。
+
+
+### 准备
+
+```java
+public class hello{
+
+    public static void main (String[] args){
+        System.out.println("hello ART !");
+    }
+}
+```
+保存为hello.java
+
+编译：
+```bash
+javac hello.java
+```
+转为dex：
+
+```bash
+dx --dex --output=hello.dex hello.class
+```
+
+
+### app_process执行java
+
+
+编写运行脚本 run.sh:
+```bash
+#!/system/bin/sh
+
+export CLASSPATH=/data/local/tmp/hello.dex
+exec app_process $base/bin hello "$@"
+```
+将hello.dex push 到/data/local/tmp/；
+
+将 run.sh push 到/system/bin，并添加可执行权限。
+
+运行：
+
+```bash
+root@shamu:/ # run.sh                                                          
+hello ART !
+```
+
+app_process运行的java程序
+
+### dalvikvm命令
+
+
+这个就更简单了，脚本都不需要了，直接运行：
+```bash
+root@shamu:/ # dalvikvm -cp /data/local/tmp/hello.dex  hello                   
+hello ART !
+
+```
+
+
+
+
+
+### 产生的oat文件
+
+不论是哪种运行方式，都会在/data/dalvik-cache/arm中产生对应的oat文件：
+
+```bash
+root@shamu:/data/dalvik-cache/arm # ll *hello*                                 
+-rw-rw-rw- root     root        12720 1970-03-24 01:20 data@local@tmp@hello.dex
+```
+
+因为没有Android系统任何组件，所以很小，便于分析oat文件的格式。

@@ -1,0 +1,78 @@
+---
+layout: post
+title: Androguard 学习2
+categories: App开发
+tags: [逆向工程]
+date: 2015-12-18 00:46:22
+---
+
+前面杂乱的介绍了交互模式下的Androguard的使用，现在介绍以下其他脚本的使用。
+
+<!--more-->
+
+### Androaxml
+
+提取AndroidManifest.xml
+
+```bash
+./androaxml.py -i <path_of_apk>  -o <name_of_output_file>
+
+```
+### Androsim
+
+比较两个apk文件
+
+```bash
+androsim.py -i  <path_of_apk1>   <path_of_apk2>  -c ZLIB -n
+```
+注意：
+
+```bash
+-c 参数指定文件格式：BZ2, ZLIB, SNAPPY, LZMA, XZ。
+```
+
+### Androdd
+
+将apk中所有的类的方法转储为png
+
+```bash
+./androdd.py -i <path_of_apk>  -o <path_to_output_folder> -f png
+```
+
+例如：
+
+![1][]
+
+
+### Apkviewer
+
+显示APK函数调用流程。
+
+需要安装[yEd][2]
+
+```bash
+./apkviewer.py -i <path_of_apk> -o <path_to_output_folder>
+```
+
+成功后，会在output中生成methodcalls.graphml,然后用yEd打开。
+![3][]
+
+注意该工具在2.0 Androguard中执行时报错，可以在github上看到作者承认无法使用，而且最新开发版本中似乎也去掉了该工具，但是可以在1.9版本中使用。
+
+
+### Androapkinfo
+
+该脚本只在1.9版本中有，作用是直接显示出apk中包含的所有文件，以及service,权限等等。
+
+```bash
+./androapkinfo.py -i <path_of_apk>
+```
+
+
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/androguard-2.png
+[2]: http://www.yworks.com/products/yed/download
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/androguard-3.png
+
+

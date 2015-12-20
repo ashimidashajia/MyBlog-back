@@ -1,0 +1,120 @@
+---
+layout: post
+title: Dalvik字节码文件dex再探
+categories: Android底层开发
+tags: [逆向开发]
+date: 2015-12-18 23:47:49
+---
+
+前面已有文章[介绍dex文件][1]了，不过是参考网络其他同行的分析，最近一直在搞Android虚拟机，也有了自己的认识，整理以下以备查询。
+
+<!--more-->
+
+
+### dex文件由来
+
+Android app是用java开发的，利用javac编译出来的是.class文件，Android提供了dx命令，将class字节码转换为Dalvik的dex字节码文件。
+
+![][2]
+
+dex格式定义在 Android源码:
+```
+art/runtime/Dex_file.h
+```
+
+![][3]
+
+
+虽然Android 5.0开始，ART取代了Dalvik虚拟机，但是dex文件还是原封不动的嵌入了ART的art文件中，这个后面文章再详谈。
+
+
+
+### 分析前准备
+
+godin.java:
+
+```java
+public class godin{
+
+    public  void showInfo(){
+    
+    }
+    private static String name = "godin";
+    private static int age = 2;
+}
+
+```
+
+将其编译为.class文件：
+
+```bash
+javac godin.java
+```
+之后会生成godin.class文件.
+
+然后利用dx，将.class转换为dex文件：
+
+```bash
+dx --dex --output=godin.dex --dump-to=dumplog godin.class
+```
+会生成godin.dex和一个dump文件dumplog,此文件中生动形象的记录了dex的所有内容。
+
+
+### 分析dex文件
+
+header:
+
+![][4]
+
+其他：
+
+![][5]
+
+查找godin类的过程：
+
+godin类，实际就是一个数据类型嘛，所有的类型都在type ids记录，那么第一步自然是已godin类名为条件遍历查找了，找到godin类名在type ids中的索引。
+
+然后以其索引为查找条件，遍历class_defs.因为class_defs中的每一个class_def的第一项都是类名在type ids中的索引号，所以可以以索引号来遍历查找到godin类。
+
+找到godin类的class_def，那么就能顺利拿到class_data了：
+
+![][6]
+
+class data记录了该类所有的属性和方法信息,比如方法对应的dalvik 指令位置。
+
+这里要注意一些概念:
+
+类变量:被static修饰的字段
+
+实例字段:没有被static修饰的字段
+
+直接方法:构造函数，static修饰的函数，private修饰的函数等。
+
+虚方法：剩下的就是虚方法……
+
+Map中的数据，就是header类型的重复，完全是为了检验作用而存在的。
+
+当Android系统加载dex文件时，如果比较文件头类型个数与 map里类型不一致时，就会停止使用这个dex文件。
+
+![][7]
+
+
+最后在总结下查找类的过程。
+
+![][8]
+
+其实所有的符号信息都记录在String ids中，其余的信息基本都有它里面的内容组装的，或者直接就是其子集而已。比如说type ids存储了描述类型的字符串在string ids中的索引。
+
+
+[1]: http://www.iloveandroid.net/2015/11/09/AndroidDex_1/
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/dex-1.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/dex-2.png
+[4]: http://7xj6ce.com1.z0.glb.clouddn.com/dex-3-header.png
+[5]: http://7xj6ce.com1.z0.glb.clouddn.com/dex-4.png
+[6]: http://7xj6ce.com1.z0.glb.clouddn.com/dex-5.png
+[7]: http://7xj6ce.com1.z0.glb.clouddn.com/dex-6.png
+[8]: http://7xj6ce.com1.z0.glb.clouddn.com/dex-7.png
+
+
+
+

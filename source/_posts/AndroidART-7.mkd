@@ -1,0 +1,124 @@
+---
+layout: post
+title: ART虚拟机启动之JNI
+categories: Android底层开发
+tags: [逆向开发]
+date: 2015-12-20 22:47:23
+---
+
+AndroidRuntime::start函数中会调用JNIEnv的FindClass函数去加载ZygoteInit类，现在看看JNIEnv的是怎么回事。
+
+
+<!--more-->
+
+从下面的代码片段可明显看出 env是由 startVm函数返回的，而该函数用来启动虚拟机。
+```c++
+void AndroidRuntime::start(const char* className, const Vector<String8>& options){
+
+..........
+JNIEnv* env;
+    if (startVm(&mJavaVM, &env) != 0) {
+        return;
+    }
+..........
+}
+```
+startVm实际调用下面函数启动虚拟机：
+```c++
+extern "C" jint JNI_CreateJavaVM(JavaVM** p_vm, JNIEnv** p_env, void* vm_args) {
+ ........................................
+  *p_env = Thread::Current()->GetJniEnv();
+  *p_vm = runtime->GetJavaVM();
+  return JNI_OK;
+}
+```
+
+从该函数可知 env是通过Thread来获得的。
+
+那么Thread是何时创建的呢？
+
+从上一篇文章ART启动流程图中可以看到有这么一段流程：
+
+```bash
+
+JNI_CreateJavaVM-------->Runtime::Create------->Runtime::init------->Thread::Attach
+```
+
+没错就是这里做了JNI相关处理。
+
+
+![][1]
+
+
+Thread内部聚合JNIEnv。
+
+在ART运行时中创建的线程，在内部通过创建Thread对象来包含一些与虚拟机相关的信息。这个新的Thread对象内部除了定义JNI调用函数表之外，还定义了ART本地机器指令中调用外部函数是要用到的的外部函数调用跳转表，比如在ART堆中创建对象所需要的函数等。
+
+这里我们只关心JNI调用函数表，至于外部函数调用表，后面再谈！！！
+
+
+源码位置:
+```bash
+art/runtume/jni_internal.cc
+```
+```c++
+JNIEnvExt::JNIEnvExt(Thread* self, JavaVMExt* vm)
+    : self(self),
+      vm(vm),
+      local_ref_cookie(IRT_FIRST_SEGMENT),
+      locals(kLocalsInitial, kLocalsMax, kLocal),
+      check_jni(false),
+      critical(0),
+      monitors("monitors", kMonitorsInitial, kMonitorsMax) {
+  functions = unchecked_functions = &gJniNativeInterface;
+  if (vm->check_jni) {
+    SetCheckJniEnabled(true);
+  }
+}
+```
+上面是JNIEnvExt的构造函数，可以发现会绑定一个方法表functions:gJniNativeInterface，他的定义如下：
+
+```c++
+const JNINativeInterface gJniNativeInterface = {
+  nullptr,  // reserved0.
+  nullptr,  // reserved1.
+  nullptr,  // reserved2.
+  nullptr,  // reserved3.
+  JNI::GetVersion,
+  JNI::DefineClass,
+  JNI::FindClass,
+  JNI::FromReflectedMethod,
+  JNI::FromReflectedField,
+  JNI::ToReflectedMethod,
+  JNI::GetSuperclass,
+  JNI::IsAssignableFrom,
+  JNI::ToReflectedField,
+  JNI::Throw,
+  JNI::ThrowNew,
+  JNI::ExceptionOccurred,
+  JNI::ExceptionDescribe,
+  JNI::ExceptionClear,
+....
+}
+```
+其中每个方法都是class JNI中的一个静态方法：
+
+```c++
+  static jclass DefineClass(JNIEnv*, const char*, jobject, const jbyte*, jsize) {
+    LOG(WARNING) << "JNI DefineClass is not supported";
+    return nullptr;
+  }
+```
+
+所以只要拿到JNIEnv，就可以使用JNI方法了.
+
+这里要提醒一下，NDK发开时注册的JNI方法根上面的方法可是两码事！！！
+
+
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/art-13.png
+
+
+
+

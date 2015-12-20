@@ -1,0 +1,188 @@
+---
+layout: post
+title: 反汇编OAT文件
+categories: Android底层开发
+tags: [逆向开发]
+date: 2015-12-19 20:47:22
+---
+
+ART虚拟机最大的进步在于利用AOT技术，在dex运行前，将其翻译为本地机器码。不过这些本地码也是比较特殊的，与c/c++编译出的本地机器指令还是有不少差别的。
+
+<!--more-->
+
+
+### 未成火候的oat文件
+
+c/c++编译出来的可执行程序可以直接运行，而ART的oat文件，虽说也是一个elf文件，但是却不能离开ART直接运行，为什么呢？
+
+很重要的一个原因是垃圾回收——ART虚拟机负责的。创建对象的时候，最终也是ART虚拟机负责创建的，所以纵然是机器码本身，他在执行的时候难也免要和ART虚拟机打交道。
+
+还有原因是并不是所有的java方法都能被dex2oat翻译为本地机器码。比如说抽象类和接口，只能根据当时的运行状况，才能知道他们的方法究竟对应哪个具体方法。而这都要由ART虚拟机来解决。
+
+
+
+### 并非万能的dex2oat
+
+
+dex2oat用来进行AOT操作，也就是将dex文件翻译为本地机器码，并非java类中的所有方法都能被翻译成本地机器码。dex2oat翻译的时候，会启动ART虚拟机！！！
+
+
+### oatdump
+
+oatdump命令可以将oat文件反汇编。
+
+用法：
+
+```bash
+Usage: oatdump [options] ...
+    Example: oatdump --image=$ANDROID_PRODUCT_OUT/system/framework/boot.art
+    Example: adb shell oatdump --image=/system/framework/boot.art
+
+  --oat-file=<file.oat>: specifies an input oat filename.
+      Example: --oat-file=/system/framework/boot.oat
+
+  --image=<file.art>: specifies an input image filename.
+      Example: --image=/system/framework/boot.art
+
+  --boot-image=<file.art>: provide the image file for the boot class path.
+      Example: --boot-image=/system/framework/boot.art
+
+  --instruction-set=(arm|arm64|mips|x86|x86_64): for locating the image
+      file based on the image location set.
+      Example: --instruction-set=x86
+      Default: arm
+
+  --output=<file> may be used to send the output to a file.
+      Example: --output=/tmp/oatdump.txt
+
+  --dump:raw_mapping_table enables dumping of the mapping table.
+      Example: --dump:raw_mapping_table
+
+  --dump:raw_mapping_table enables dumping of the GC map.
+      Example: --dump:raw_gc_map
+
+  --no-dump:vmap may be used to disable vmap dumping.
+      Example: --no-dump:vmap
+
+  --no-disassemble may be used
+```
+
+执行上述命令便可以将上篇文章中的例子反汇编。可以通过--output=<file>，将反汇编结果保存到一个文件，然后pull出来，查看
+```bash
+oatdump --oat-file=data@local@tmp@hello.dex
+```
+
+部分结果：
+
+```bash
+atdump --oat-file=data@local@tmp@hello.dex                                    <
+MAGIC:
+oat
+045
+
+CHECKSUM:
+0xcce2fe07
+
+INSTRUCTION SET:
+Thumb2
+
+INSTRUCTION SET FEATURES:
+div
+
+DEX FILE COUNT:
+1
+
+EXECUTABLE OFFSET:
+0x00001000
+
+```
+可以看出指令集为Thumb2,这与具体平台相关，arm平台的话，应该默认都是这个指令集。
+
+还能看出来当前oat文件中包含多少个Dalvik dex文件。
+
+接着看：
+
+```bash
+OatDexFile:
+location: /data/local/tmp/hello.dex
+checksum: 0x1aea5dd8
+0: Lhello; (offset=0x000004f0) (type_idx=0) (StatusInitialized) (OatClassAllCompiled)
+  0: void hello.<init>() (dex_method_idx=0)
+
+```
+
+oatdump反汇编结果中还能看出当前oat文件中Dalvik dex文件的位置以及校验值。
+
+这里OatClassAllCompiled表明hello类中的方法全都被翻译为了本地机器码，如果只是部分被翻译为本地机器码的话，会显示：OatClassSomeCompiled.
+
+
+
+继续看：
+
+```bash
+ 1: void hello.main(java.lang.String[]) (dex_method_idx=1)
+    DEX CODE:
+      0x0000: sget-object  v0, Ljava/io/PrintStream; java.lang.System.out // field@0
+      0x0002: const-string v1, "hello ART !" // string@9
+      0x0004: invoke-virtual {v0, v1}, void java.io.PrintStream.println(java.lang.String) // method@2
+      0x0007: return-void
+    OatMethodOffsets (offset=0x000004f8)
+      code_offset: 0x00001075 
+      gc_map: (offset=0x00000506)
+    OatQuickMethodHeader (offset=0x00001058)
+      mapping_table: (offset=0x0000051e)
+      vmap_table: (offset=0x00000530)
+      v65534/r5, v0/r6, v1/r7, v65535/r15
+    QuickMethodFrameInfo
+      frame_size_in_bytes: 48
+      core_spill_mask: 0x000080e0 (r5, r6, r7, r15)
+      fp_spill_mask: 0x00000000 
+    CODE: (code_offset=0x00001075 size_offset=0x00001070 size=112)...
+      0x00001074: f5bd5c00  subs    r12, sp, #8192
+      0x00001078: f8dcc000  ldr.w   r12, [r12, #0]
+      suspend point dex PC: 0x0000
+      GC map objects:  v2 ([sp + #52])
+      0x0000107c: e92d40e0  push    {r5, r6, r7, lr}
+      0x00001080: b088      sub     sp, sp, #32
+      0x00001082: 1c05      mov     r5, r0
+      0x00001084: 9000      str     r0, [sp, #0]
+      0x00001086: 910d      str     r1, [sp, #52]
+
+```
+
+oatdump会同时显示出方法的Dalvik指令和本地CPU汇编指令。当热如果该方法没有本地指令的话，那么就只显示Dalvik指令了。
+
+
+
+### oatdump原理
+
+oatdump源码：
+
+```bash
+art/oatdump/oatdump.cc
+```
+oatdump反汇编时，主要分两种情况：
+
+1）. 反汇编oat文件
+
+这种情况很简单，基本上就是打开oat文件，然后找到dex文件，以及对应的oatclass，接着直接将想要的信息，打印输出即可。具体可以看源码：
+
+```c++
+  if (oat_filename != nullptr) {
+    std::string error_msg;
+    OatFile* oat_file =
+        OatFile::Open(oat_filename, oat_filename, nullptr, nullptr, false, &error_msg);
+    if (oat_file == nullptr) {
+      fprintf(stderr, "Failed to open oat file from '%s': %s\n", oat_filename, error_msg.c_str());
+      return EXIT_FAILURE;
+    }
+    OatDumper oat_dumper(*oat_file, oat_dumper_options.release());
+    bool success = oat_dumper.Dump(*os);
+    return (success) ? EXIT_SUCCESS : EXIT_FAILURE;
+  }
+
+```
+
+2). 反汇编img文件
+
+这种情况就很复杂了，需要启动ART虚拟机来进行反汇编。
