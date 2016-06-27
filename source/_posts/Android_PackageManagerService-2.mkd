@@ -1,0 +1,181 @@
+---
+layout: post
+title: PMS运行时的一些规则
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-06-20 15:44:17
+---
+
+前面介绍了pm命令如何使用，从侧面也反应出了PMS提供了哪些功能。那么在真正分析源码之前，还要了解一下PMS的一些默认规则。
+
+<!--more-->
+
+本文主要介绍与PMS相关的目录与文件，以及PMS操作它们的规则。
+
+
+
+
+
+### APK文件路径
+
+APK主要分为两类：
+
+1. 系统自带的APK
+
+2. 用户安装的第三方APK
+
+
+对于系统自带的APK,可以从下面的路径中查找：
+
+####  /system/priv-app
+该路径存放一些系统底层的应用，比如Setting，systemUI等。该目录中的app拥有较高的系统权限，而且如果要使用
+
+```shell
+android:protectionLevel=signatureOrSystem
+```
+那么该app必须放到priv-app目录中去。
+
+#### /system/app
+
+该目录中存放的系统app权限相对较低，而且当拥有root权限时，就有可能卸载掉这些app。
+
+
+#### /vendor/app
+
+该目录存放vendor厂商的app
+
+#### /oem/app
+
+该目录中存放oem特有的app。
+
+
+#### /data/app
+用户安装的第三方app
+
+
+PMS启动的时候，也是按照上述顺序逐个扫描解析这些目录中的apk的。
+
+
+### 安装APK的方法
+
+#### 系统应用的安装
+
+PMS启动的时候完成，没有安装界面。
+
+
+#### 通过设备自带的应用商店下载的apk
+
+下载完APK之后，调用Packagemanager接口安装，没有安装界面。
+
+#### ADB命令安装
+
+adb命令实际上是通过pm命令来安装的，同样没有安装界面。
+
+
+#### 第三方应用安装
+
+通过SD卡里的APK文件安装，有安装界面，由packageinstaller.apk应用处理安装及卸载过程的界面。
+
+
+在ANdroid 5.0之前，Android系统会监视前面所说的几个存放apk的路径，一旦发现有新的apk被放进去了，就会自带安装。5.0之后，不在采取此策略。只有系统启动的时候，才会扫描这写路径中的apk。
+
+
+
+
+### apk数据存储的位置
+
+apk安装之后，产生的数据都存储在/data文件中。
+
+
+#### /data/app
+
+用户安装的第三方apk，以及app所依赖的native library都放在这里。
+
+在Android 6.0时，此目录了一个文件夹“oat”，用来存放此app，第一次运行时由dex2oat生成的此app的oat文件。在之前的Android版本中，用户安装的app的oat文件存储在
+
+```shell
+/data/dalvik-cache
+```
+中。6.0时，此目录只存放系统自带的apk的oat文件。
+
+
+#### /data/data/
+
+是系统当前用户安装的所有app的沙箱目录。该目录实际上是
+
+```shell
+/data/user/用户ID
+```
+这个目录的引用。随着用户的切换，”/data/data/“也会映射为不同的用户。
+
+
+
+### PMS的配置文件
+
+PMS会产生一些配置文件，用来记录系统当前安装的app,这些文件存储在：
+
+```shell
+/data/system/
+```
+1. packages.xml
+
+记录系统中所有已经安装的应用信息，包括基本信息，签名和权限。
+
+如下图所示:
+![][1]
+
+当操作该文件的时候，总会创建备份文件packages-backup.xml.当正常操作完成的时候，会删除该备份。否则，当PMS下次启动的时候，一旦发现有backup文件，就会优先解析备份文件。
+
+当一个app被升级覆盖安装时，会使用updated-packages表示，当新旧版本app的包名发生改变时，会使用renamed-package记录。
+
+2. packages-stoped.xml
+
+记录系统中被强制停止运行的app的信息。它同样可能存在一个packages-stoped-backup.xml的备份文件，当备份文件存在的时候，优先使用备份文件。因为原文件可能已经损坏了。
+
+3. packages.list
+
+保存应用的数据目录和uid信息。
+
+如：
+```shell
+com.qihoo.appstore 10067 0 /data/data/com.qihoo.appstore default 3002,3003,3001
+```
+
+第一列为app的包名。
+
+10067为此app的用户ID.
+
+第三列中的0，表示此app所属的系统用户ID.
+
+第四列为此app的沙箱目录。
+
+default为seinfo,SEAndroid相关机制会使用该字段。
+
+最后一列记录了该app所在的权限组，也就是说拥有哪些权限。
+
+
+### 系统硬件特性和权限
+
+PMS启动的时候会从
+
+```shell
+/system/etc/permissions/
+```
+中读取当前Android设备的硬件特性和设定的相关权限。
+
+所谓的硬件特性，狭义上可以理解为当前设备支持哪些外设，比如camera，NFC，wifi,usb等等。
+
+正是因为解析了该目录中的文件，所以可以通过pm命令查看features和permissions等信息。
+
+
+### 多用户管理
+
+PMS还要对多用户进行管理。因为安装apk的时候，可以PMS可以指定给某个特定的用户，也可以安装给全部的用户。
+
+
+### 权限动态管理
+
+Android M 中 允许动态授权和取消App中申请的权限。
+
+
+[1]:http://7xj6ce.com1.z0.glb.clouddn.com/PMS-1.png

@@ -1,0 +1,706 @@
+---
+layout: post
+title: Android-6.0之PMS安装APK上篇
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-06-26 15:26:07
+---
+
+现在开始正式分析Android如何安装一个APK.
+
+<!--more-->
+
+当使用Intent安装一个Android存储中的一个apk文件时，实际上是调用Android系统一个内部应用packageinstaller来完成的。这个内置系统应用，会显示安装过程，自然也有界面了，大家应该非常熟悉了，无非就是显示一些进度条，此app有哪些权限，以及安装完成自后，是否打开等。
+
+packageinstaller内部也是对PMS的调用，安装时，会先调用PMS相关接口，解析APK文件，也就是其AndroidMainifest.xml文件，这样就得到了该app的组件，权限，包名等信息。然后以包名为key,检查该app是否已经安装，安装的话，设置replace的flag.
+
+如果是之前没安装过的，那么会弹出一个activity，显示该app有哪些权限，底部有两个Button:"取消"和“安装”。点击"安装"，就开始安装了。
+
+如果该app之前安装过了，弹出的Activity中会提示：“你要安装此应用的新版本吗？。。。。”，最后还会罗列出新app相比已经安装在设备上的app的权限有哪些变化，比如新添加了哪些权限等等。底部同样会提供两个Button："取消"和“安装”。点击"安装"，就开始安装了。
+
+
+当点击"安装"button之后，实际上跳转到PackageInstaller的InstallAppProgress这个activity了。
+
+```shell
+Android-6/frameworks/base/core/java/android/content/pm/InstallAppProgress.java
+```
+
+实际上就是执行该activity的onCreate方法，该方法又调用initView方法，initView方法再次进行一系列判断并创建用于观察安装是否成功的观察者类PackageInstallObserver对象后，开始调用下面的方法，开始真正的安装过程。
+
+```java
+pm.installPackageWithVerificationAndEncryption(mPackageURI, observer, installFlags,
+        installerPackageName, verificationParams, null);
+```
+其代码实现：
+```shell
+Android6.0/frameworks/base/core/java/android/app/ApplicationPackageManager.java
+```
+```java
+public void installPackageWithVerificationAndEncryption(Uri packageURI,
+        PackageInstallObserver observer, int flags, String installerPackageName,
+        VerificationParams verificationParams, ContainerEncryptionParams encryptionParams) {
+    installCommon(packageURI, observer, flags, installerPackageName, verificationParams,
+            encryptionParams);
+}
+```
+
+内部直接又调用了installCommon方法：
+
+```java
+private void installCommon(Uri packageURI,
+           PackageInstallObserver observer, int flags, String installerPackageName,
+           VerificationParams verificationParams, ContainerEncryptionParams encryptionParams) {
+       if (!"file".equals(packageURI.getScheme())) {
+           throw new UnsupportedOperationException("Only file:// URIs are supported");
+       }
+       if (encryptionParams != null) {
+           throw new UnsupportedOperationException("ContainerEncryptionParams not supported");
+       }
+
+       final String originPath = packageURI.getPath();
+       try {
+           mPM.installPackage(originPath, observer.getBinder(), flags, installerPackageName,
+                   verificationParams, null);
+       } catch (RemoteException ignored) {
+       }
+   }
+
+```
+做了一系列判断后，接着调用mPM的installPackage方法。mPM就是PMS的一个代理。也就是说这里实际会调用PMS的installPackage方法：
+
+```java
+public void installPackage(String originPath, IPackageInstallObserver2 observer,
+           int installFlags, String installerPackageName, VerificationParams verificationParams,
+           String packageAbiOverride) {
+       installPackageAsUser(originPath, observer, installFlags, installerPackageName,
+               verificationParams, packageAbiOverride, UserHandle.getCallingUserId());
+   }
+```
+整个安装过程很复杂，大体上可分为两个过程：
+
+1. 权限检查
+
+2. 复制文件
+
+3. 装载应用
+
+
+### 权限检查
+
+```java
+public void installPackageAsUser(String originPath, IPackageInstallObserver2 observer,
+           int installFlags, String installerPackageName, VerificationParams verificationParams,
+           String packageAbiOverride, int userId) {
+       mContext.enforceCallingOrSelfPermission(android.Manifest.permission.INSTALL_PACKAGES, null);
+
+       // 利用binder机制，获取安装发起进程的uid
+       final int callingUid = Binder.getCallingUid();
+       //
+       enforceCrossUserPermission(callingUid, userId, true, true, "installPackageAsUser");
+
+       ..............................................
+```
+先检查权限：
+
+```java
+void enforceCrossUserPermission(int callingUid, int userId, boolean requireFullPermission,
+            boolean checkShell, String message) {
+        if (userId < 0) {
+            throw new IllegalArgumentException("Invalid userId " + userId);
+        }
+        //当前userid和发起者进程所属的userid一致，那么OK，直接返回
+        // 我们现在就属于这种情况
+        if (userId == UserHandle.getUserId(callingUid)) return;
+
+        //不一致，那就要看是不是SYSTEM进程了，依旧不是，那么执行下逻辑，抛异常
+        if (callingUid != Process.SYSTEM_UID && callingUid != 0) {
+            if (requireFullPermission) {
+                mContext.enforceCallingOrSelfPermission(
+                        android.Manifest.permission.INTERACT_ACROSS_USERS_FULL, message);
+            } else {
+                try {
+                    mContext.enforceCallingOrSelfPermission(
+                            android.Manifest.permission.INTERACT_ACROSS_USERS_FULL, message);
+                } catch (SecurityException se) {
+                    mContext.enforceCallingOrSelfPermission(
+                            android.Manifest.permission.INTERACT_ACROSS_USERS, message);
+                }
+            }
+        }
+    }
+```
+这里的权限检查主要是检查进程是否有权限安装.
+
+继续installPackageAsUser代码：
+
+```java
+
+      //检查当前系统用户是否具备安装app的权限
+       if (isUserRestricted(userId, UserManager.DISALLOW_INSTALL_APPS)) {
+           try {
+               if (observer != null) {
+                   observer.onPackageInstalled("", INSTALL_FAILED_USER_RESTRICTED, null, null);
+               }
+           } catch (RemoteException re) {
+           }
+           return;
+       }
+
+       //如果是发起端进程是shell或者root，那么添加flags:PackageManager.INSTALL_FROM_ADB
+       if ((callingUid == Process.SHELL_UID) || (callingUid == Process.ROOT_UID)) {
+           installFlags |= PackageManager.INSTALL_FROM_ADB;
+
+       } else {
+           // Caller holds INSTALL_PACKAGES permission, so we're less strict
+           // about installerPackageName.
+
+           // 从flags中去掉INSTALL_FROM_ADB和INSTALL_ALL_USERS
+           installFlags &= ~PackageManager.INSTALL_FROM_ADB;
+           installFlags &= ~PackageManager.INSTALL_ALL_USERS;
+       }
+
+       //创建一个当前用户的handle
+       UserHandle user;
+       if ((installFlags & PackageManager.INSTALL_ALL_USERS) != 0) {
+           user = UserHandle.ALL;
+       } else {
+           user = new UserHandle(userId);
+       }
+
+       // Only system components can circumvent runtime permissions when installing.
+       // Android 6.0 当权限属于运行时权限时，需要弹出框，让用户授权，对于system app，应该取消运行时权限弹框授权，而是直接授权。
+       // 那么就要在system app中加入INSTALL_GRANT_RUNTIME_PERMISSIONS
+       // 我们安装第三方app，当然没有INSTALL_GRANT_RUNTIME_PERMISSIONS了
+       if ((installFlags & PackageManager.INSTALL_GRANT_RUNTIME_PERMISSIONS) != 0
+               && mContext.checkCallingOrSelfPermission(Manifest.permission
+               .INSTALL_GRANT_RUNTIME_PERMISSIONS) == PackageManager.PERMISSION_DENIED) {
+           throw new SecurityException("You need the "
+                   + "android.permission.INSTALL_GRANT_RUNTIME_PERMISSIONS permission "
+                   + "to use the PackageManager.INSTALL_GRANT_RUNTIME_PERMISSIONS flag");
+       }
+
+       verificationParams.setInstallerUid(callingUid);
+```
+这里主要是对当前用户是否有权限安装app进行检查，以及安装的app是仅仅为当前用户安装，还是给所有的用户安装。从以上代码可以得出，当安装进程是shell或者root时，flags中又包含了INSTALL_ALL_USERS时，才会给所有用户安装，否则大多数情况下，仅仅安装给当前的用户。当我们使用pm命令安装的时候，可以选择安装给哪个用户，也可以是全部用户，就是这个原因。
+
+继续installPackageAsUser代码：
+
+```java
+       final File originFile = new File(originPath);
+
+
+       //后续判断APK安装到哪里时，会用到
+       final OriginInfo origin = OriginInfo.fromUntrustedFile(originFile);
+
+       final Message msg = mHandler.obtainMessage(INIT_COPY);
+       msg.obj = new InstallParams(origin, null, observer, installFlags, installerPackageName,
+               null, verificationParams, user, packageAbiOverride, null);
+       mHandler.sendMessage(msg);
+   }
+```
+构造InstallParams，然后利用Android中的Handler机制，发送给相关的线程进行安装。
+
+installPackageAsUser整个执行逻辑如![][1]所示。
+
+
+
+### 复制文件
+
+前面发送了INIT_COPY消息，现在看如何处理：
+
+```java
+void doHandleMessage(Message msg) {
+            switch (msg.what) {
+                case INIT_COPY: {
+                    HandlerParams params = (HandlerParams) msg.obj;
+                    int idx = mPendingInstalls.size();
+                    if (DEBUG_INSTALL) Slog.i(TAG, "init_copy idx=" + idx + ": " + params);
+                    // If a bind was already initiated we dont really
+                    // need to do anything. The pending install
+                    // will be processed later on.
+                    if (!mBound) {
+                        // If this is the only one pending we might
+                        // have to bind to the service again.
+                        // 将绑定DefaultContainerService服务
+                        if (!connectToService()) {
+                            Slog.e(TAG, "Failed to bind to media container service");
+                            params.serviceError();//连接服务失败
+                            return;
+                        } else {
+                            // Once we bind to the service, the first
+                            // pending request will be processed.
+                            // 连接成功，吧安装信息保存到mPendingInstalls中
+                            // 等待收到连接的返回消息后，再继续安装
+                            mPendingInstalls.add(idx, params);
+                        }
+                    } else {
+                        // 插入安装信息
+                        mPendingInstalls.add(idx, params);
+                        // Already bound to the service. Just make
+                        // sure we trigger off processing the first request.
+                        if (idx == 0) {
+                            //如果mPendingInstalls中只有一项，那么立即发送MCS_BOUND消息
+                            mHandler.sendEmptyMessage(MCS_BOUND);
+                        }
+                    }
+                    break;
+                }
+                ........
+```
+INIT_COPY消息的处理中将绑定DefaultContainerService,因为这是一个异步的过程，要等待的绑定的结果通过onServiceConnected()返回，所以这里就将安装的参数信息放到了mPendingInstalls列表中，如果这个Service之前就绑定好了，现在就不要再次绑定了，安装信息同样要放到mPendingInstalls中。如果有多个安装请求同时到达，就可以通过mPendingInstalls列表对它们进行排队。如果列表中只有一项，说明没有更多的安装请求，因此这种情况下，需要立即发出MCS_BOUND消息，进入下一步的处理。
+
+
+
+```java
+private boolean connectToService() {
+            if (DEBUG_SD_INSTALL) Log.i(TAG, "Trying to bind to" +
+                    " DefaultContainerService");
+            Intent service = new Intent().setComponent(DEFAULT_CONTAINER_COMPONENT);
+            Process.setThreadPriority(Process.THREAD_PRIORITY_DEFAULT);
+            if (mContext.bindServiceAsUser(service, mDefContainerConn,
+                    Context.BIND_AUTO_CREATE, UserHandle.OWNER)) {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
+                mBound = true;
+                return true;
+            }
+            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
+            return false;
+        }
+
+class DefaultContainerConnection implements ServiceConnection {
+       public void onServiceConnected(ComponentName name, IBinder service) {
+           if (DEBUG_SD_INSTALL) Log.i(TAG, "onServiceConnected");
+           IMediaContainerService imcs =
+               IMediaContainerService.Stub.asInterface(service);
+           mHandler.sendMessage(mHandler.obtainMessage(MCS_BOUND, imcs));
+       }
+
+       public void onServiceDisconnected(ComponentName name) {
+           if (DEBUG_SD_INSTALL) Log.i(TAG, "onServiceDisconnected");
+       }
+   }
+
+```
+
+可以看到当绑定成功后在onServiceConnected中将一个IBinder转换成了一个IMediaContainerService.这个就是在onServiceConnected回调函数中根据参数传进来的IMediaContainerService.Stub的对象引用创建的一个远程代理对象。以后PMS务通过该代理对象访问DefaultContainerService服务。它是一个应用服务。
+
+整个INIT_COPY逻辑如![][2]所示。
+
+接下来分析MCS_BOUND消息。
+
+```java
+case MCS_BOUND:  {
+                    if (DEBUG_INSTALL) Slog.i(TAG, "mcs_bound");
+                    if (msg.obj != null) {
+                        mContainerService = (IMediaContainerService) msg.obj;
+                    }
+                    if (mContainerService == null) {
+                        if (!mBound) {
+                            // Something seriously wrong since we are not bound and we are not
+                            // waiting for connection. Bail out.
+                            Slog.e(TAG, "Cannot bind to media container service");
+                            for (HandlerParams params : mPendingInstalls) {
+                                // Indicate service bind error
+                                // 连接失败，通过参数中的毁掉接口，通知调用者出错了
+                                params.serviceError();
+                            }
+                            mPendingInstalls.clear();
+                        } else {
+                            Slog.w(TAG, "Waiting to connect to media container service");
+                        }
+                    } else if (mPendingInstalls.size() > 0) {
+                        HandlerParams params = mPendingInstalls.get(0);
+                        if (params != null) {
+                            if (params.startCopy()) {//==============执行拷贝操作
+                                // We are done...  look for more work or to
+                                // go idle.
+                                if (DEBUG_SD_INSTALL) Log.i(TAG,
+                                        "Checking for more work or unbind...");
+                                // Delete pending install
+                                if (mPendingInstalls.size() > 0) {
+                                    mPendingInstalls.remove(0);//工作完成后，删除第一项
+                                }
+                                if (mPendingInstalls.size() == 0) {
+                                    if (mBound) {
+                                        if (DEBUG_SD_INSTALL) Log.i(TAG,
+                                                "Posting delayed MCS_UNBIND");
+                                        removeMessages(MCS_UNBIND);
+                                        Message ubmsg = obtainMessage(MCS_UNBIND);
+                                        // Unbind after a little delay, to avoid
+                                        // continual thrashing.
+                                        // 如果没有安装信息了，则发送延时10秒的MCS_UNBIND消息
+                                        sendMessageDelayed(ubmsg, 10000);
+                                    }
+                                } else {
+                                    // There are more pending requests in queue.
+                                    // Just post MCS_BOUND message to trigger processing
+                                    // of next pending install.
+                                    // 如果还有安装信息，则继续发送MCS_BOUND消息
+                                    if (DEBUG_SD_INSTALL) Log.i(TAG,
+                                            "Posting MCS_BOUND for next work");
+                                    mHandler.sendEmptyMessage(MCS_BOUND);
+                                }
+                            }
+                        }
+                    } else {
+                        // Should never happen ideally.
+                        Slog.w(TAG, "Empty queue");
+                    }
+                    break;
+                }
+```
+MCS_BOUND消息的处理过程就是调用InstallParams类的startCopy()方法来执行拷贝操作。只要mPendingInstalls中还有安装信息，就会重复发送MCS_BOUND消息，直到所有的应用都安装完毕，然后在发送一个延时10秒的MCS_UNBIND消息。
+
+```java
+case MCS_UNBIND: {
+                    // If there is no actual work left, then time to unbind.
+                    if (DEBUG_INSTALL) Slog.i(TAG, "mcs_unbind");
+
+                    if (mPendingInstalls.size() == 0 && mPendingVerification.size() == 0) {
+                        if (mBound) {
+                            if (DEBUG_INSTALL) Slog.i(TAG, "calling disconnectService()");
+
+                            disconnectService();
+                        }
+                    } else if (mPendingInstalls.size() > 0) {
+                        // There are more pending requests in queue.
+                        // Just post MCS_BOUND message to trigger processing
+                        // of next pending install.
+                        mHandler.sendEmptyMessage(MCS_BOUND);
+                    }
+
+                    break;
+                }
+```
+MCS_UNBIND消息的处理就简单了，当mPendingInstalls中没有安装信息的时候，就调用disconnectService断开与DefaultContainerService的连接。如果发现还有安装信息，则继续发送MCS_BOUND消息。
+
+接下来分析真正的拷贝方法：startCopy
+
+```java
+final boolean startCopy() {
+           boolean res;
+           try {
+               if (DEBUG_INSTALL) Slog.i(TAG, "startCopy " + mUser + ": " + this);
+              // MAX_RETRIES为4
+               if (++mRetries > MAX_RETRIES) {
+                   Slog.w(TAG, "Failed to invoke remote methods on default container service. Giving up");
+                   mHandler.sendEmptyMessage(MCS_GIVE_UP);
+                   handleServiceError();
+                   return false;
+               } else {
+                   handleStartCopy();
+                   res = true;
+               }
+           } catch (RemoteException e) {
+               if (DEBUG_INSTALL) Slog.i(TAG, "Posting install MCS_RECONNECT");
+               mHandler.sendEmptyMessage(MCS_RECONNECT);
+               res = false;
+           }
+           handleReturnCode();//会尝试重新绑定
+           return res;
+       }
+```
+startCopy()方法通过调用其子类InstallParams的handleStartCopy()来完成拷贝操作。考虑到安装过程的不确定性，startCopy主要工作是进行错误处理，当捕获到handleStartCopy跑出的异常时，startCopy将发送MCS_RECONNECT.在MCS_RECONNECT消息的处理中，将会重新绑定DefaultContainerService,如果绑定成功，那么安装过程将会重新开始。startCopy也将会再次被调用，重试的次数记录在mRetries中，当累计重试超过4次时，安装将失。如果安装失败，那么startCopy将会调用handleReturnCode()来继续处理。
+
+```java
+ public void handleStartCopy() throws RemoteException{
+            int ret = PackageManager.INSTALL_SUCCEEDED;
+
+            // If we're already staged, we've firmly committed to an install location
+            // 这里staged为false,前面在创建origin时，传入的false
+            if (origin.staged) {
+                if (origin.file != null) {
+                    installFlags |= PackageManager.INSTALL_INTERNAL;
+                    installFlags &= ~PackageManager.INSTALL_EXTERNAL;
+                } else if (origin.cid != null) {
+                    installFlags |= PackageManager.INSTALL_EXTERNAL;
+                    installFlags &= ~PackageManager.INSTALL_INTERNAL;
+                } else {
+                    throw new IllegalStateException("Invalid stage location");
+                }
+            }
+
+            // 检查installFlags中是否有设置安装到哪里，我们这种情况下，是没有设置的，但是当通过pm命令安装的时候，是可以指定安装到哪里的
+            final boolean onSd = (installFlags & PackageManager.INSTALL_EXTERNAL) != 0;
+            final boolean onInt = (installFlags & PackageManager.INSTALL_INTERNAL) != 0;
+
+            //精简版PackageInfo
+            PackageInfoLite pkgLite = null;
+
+            // 如果即设置了安装在内部存储中又设置了安装在外部SD中，则报错
+            if (onInt && onSd) {
+                // Check if both bits are set.
+                Slog.w(TAG, "Conflicting flags specified for installing on both internal and external");
+                ret = PackageManager.INSTALL_FAILED_INVALID_INSTALL_LOCATION;
+            } else {
+                pkgLite = mContainerService.getMinimalPackageInfo(origin.resolvedPath, installFlags,
+                        packageAbiOverride);
+
+                /*
+                 * If we have too little free space, try to free cache
+                 * before giving up.
+                 */
+                 //检查存储空间是否够安装该app，不够的话，执行下面的分支
+                if (!origin.staged && pkgLite.recommendedInstallLocation
+                        == PackageHelper.RECOMMEND_FAILED_INSUFFICIENT_STORAGE) {
+                    // TODO: focus freeing disk space on the target device
+                    final StorageManager storage = StorageManager.from(mContext);
+                    final long lowThreshold = storage.getStorageLowBytes(
+                            Environment.getDataDirectory());
+
+                    final long sizeBytes = mContainerService.calculateInstalledSize(
+                            origin.resolvedPath, isForwardLocked(), packageAbiOverride);
+
+                    //尝试释放一些cache空间
+                    if (mInstaller.freeCache(null, sizeBytes + lowThreshold) >= 0) {
+                      //然后重新获取PackageInfoLite
+                        pkgLite = mContainerService.getMinimalPackageInfo(origin.resolvedPath,
+                                installFlags, packageAbiOverride);
+                    }
+
+                    /*
+                     * The cache free must have deleted the file we
+                     * downloaded to install.
+                     *
+                     * TODO: fix the "freeCache" call to not delete
+                     *       the file we care about.
+                     */
+                    if (pkgLite.recommendedInstallLocation
+                            == PackageHelper.RECOMMEND_FAILED_INVALID_URI) {
+                        pkgLite.recommendedInstallLocation
+                            = PackageHelper.RECOMMEND_FAILED_INSUFFICIENT_STORAGE;
+                    }
+                }
+            }
+
+            if (ret == PackageManager.INSTALL_SUCCEEDED) {
+                int loc = pkgLite.recommendedInstallLocation;
+                if (loc == PackageHelper.RECOMMEND_FAILED_INVALID_LOCATION) {
+                    ret = PackageManager.INSTALL_FAILED_INVALID_INSTALL_LOCATION;
+                } else if (loc == PackageHelper.RECOMMEND_FAILED_ALREADY_EXISTS) {
+                    ret = PackageManager.INSTALL_FAILED_ALREADY_EXISTS;
+                } else if (loc == PackageHehandleStartCopylper.RECOMMEND_FAILED_INSUFFICIENT_STORAGE) {
+                    ret = PackageManager.INSTALL_FAILED_INSUFFICIENT_STORAGE;
+                } else if (loc == PackageHelper.RECOMMEND_FAILED_INVALID_APK) {
+                    ret = PackageManager.INSTALL_FAILED_INVALID_APK;
+                } else if (loc == PackageHelper.RECOMMEND_FAILED_INVALID_URI) {
+                    ret = PackageManager.INSTALL_FAILED_INVALID_URI;
+                } else if (loc == PackageHelper.RECOMMEND_MEDIA_UNAVAILABLE) {
+                    ret = PackageManager.INSTALL_FAILED_MEDIA_UNAVAILABLE;
+                } else {
+                    // Override with defaults if needed.
+                    loc = installLocationPolicy(pkgLite);
+                    if (loc == PackageHelper.RECOMMEND_FAILED_VERSION_DOWNGRADE) {
+                        ret = PackageManager.INSTALL_FAILED_VERSION_DOWNGRADE;
+                    } else if (!onSd && !onInt) {
+                        // Override install location with flags
+                        if (loc == PackageHelper.RECOMMEND_INSTALL_EXTERNAL) {
+                            // Set the flag to install on external media.
+                            installFlags |= PackageManager.INSTALL_EXTERNAL;
+                            installFlags &= ~PackageManager.INSTALL_INTERNAL;
+                        } else {
+                            // Make sure the flag for installing on external
+                            // media is unset
+                            installFlags |= PackageManager.INSTALL_INTERNAL;
+                            installFlags &= ~PackageManager.INSTALL_EXTERNAL;
+                        }
+                    }
+                }
+            }
+
+            final InstallArgs args = createInstallArgs(this);
+            mArgs = args;
+
+            if (ret == PackageManager.INSTALL_SUCCEEDED) {
+                 /*
+                 * ADB installs appear as UserHandle.USER_ALL, and can only be performed by
+                 * UserHandle.USER_OWNER, so use the package verifier for UserHandle.USER_OWNER.
+                 */
+                int userIdentifier = getUser().getIdentifier();
+                if (userIdentifier == UserHandle.USER_ALL
+                        && ((installFlags & PackageManager.INSTALL_FROM_ADB) != 0)) {
+                    userIdentifier = UserHandle.USER_OWNER;
+                }
+
+                /*
+                 * Determine if we have any installed package verifiers. If we
+                 * do, then we'll defer to them to verify the packages.
+                 */
+                final int requiredUid = mRequiredVerifierPackage == null ? -1
+                        : getPackageUid(mRequiredVerifierPackage, userIdentifier);
+                if (!origin.existing && requiredUid != -1
+                        && isVerificationEnabled(userIdentifier, installFlags)) {
+                    //此处是进行校验，具体校验什么没有深究，因为其发送的这个
+                    //android.intent.action.PACKAGE_NEEDS_VERIFICATION
+                    // 我没找到谁来处理它
+                    ..................................
+                } else {
+                    /*
+                     * No package verification is enabled, so immediately start
+                     * the remote call to initiate copy using temporary file.
+                     */
+                    ret = args.copyApk(mContainerService, true);
+                }
+            }
+
+            mRet = ret;
+        }
+```
+handleStartCopy()方法会判断该app应该安装到哪里，如果安装空间不足的话，会尝试在清理一些cache空间后，再次尝试安装。该方法中很多代码是在将一些信息通过发送Intent android.intent.action.PACKAGE_NEEDS_VERIFICATION 给系统中所有接收该Intent进行处理，但是很遗憾，我没找到处理这个Intent的东东。如果不需要校验的话，就直接调用InstallArgs的copyApk()方法。
+
+该方法整个逻辑如![][3]所示。
+
+再分析copyApk之前，先看InstallParams和InstallArgs之间的关系：
+
+![][4]
+
+createInstallArgs传入的params,在本例中就是InstallParams，在它的handleStartCopy()中已经确定了安装在哪里。
+
+```java
+private InstallArgs createInstallArgs(InstallParams params) {
+      if (params.move != null) {
+        // 移动app
+          return new MoveInstallArgs(params);
+      } else if (installOnExternalAsec(params.installFlags) || params.isForwardLocked()) {
+        // 安装在SD
+          return new AsecInstallArgs(params);
+      } else {
+        // 安装在内部存储
+          return new FileInstallArgs(params);
+      }
+  }
+```
+本例中是安装在内部存储的，所以创建的就是FileInstallArgs了，那么调用的copyApk，自然就是FileInstallArgs的了。
+
+```java
+int copyApk(IMediaContainerService imcs, boolean temp) throws RemoteException {
+          if (origin.staged) {
+              if (DEBUG_INSTALL) Slog.d(TAG, origin.file + " already staged; skipping copy");
+              codeFile = origin.file;
+              resourceFile = origin.file;
+              return PackageManager.INSTALL_SUCCEEDED;
+          }
+
+          try {
+              final File tempDir = mInstallerService.allocateStageDirLegacy(volumeUuid);
+              codeFile = tempDir;
+              resourceFile = tempDir;
+          } catch (IOException e) {
+              Slog.w(TAG, "Failed to create copy file: " + e);
+              return PackageManager.INSTALL_FAILED_INSUFFICIENT_STORAGE;
+          }
+  ............
+```
+allocateStageDirLegacy:
+
+```java
+public File allocateStageDirLegacy(String volumeUuid) throws IOException {
+        synchronized (mSessions) {
+            try {
+                // 分配本次安装会话的ID
+                final int sessionId = allocateSessionIdLocked();
+                mLegacySessions.put(sessionId, true);
+                // 得到一个本次安装的阶段性文件夹，后续会改名
+                final File stageDir = buildStageDir(volumeUuid, sessionId);
+                prepareStageDir(stageDir);
+                return stageDir;
+            } catch (IllegalStateException e) {
+                throw new IOException(e);
+            }
+        }
+    }
+
+    private File buildStageDir(String volumeUuid, int sessionId) {
+          final File stagingDir = buildStagingDir(volumeUuid);
+          return new File(stagingDir, "vmdl" + sessionId + ".tmp");
+      }
+
+      private File buildStagingDir(String volumeUuid) {
+              return Environment.getDataAppDirectory(volumeUuid);
+          }
+      // volumeUuid一般为null
+      public static File getDataDirectory(String volumeUuid) {
+          if (TextUtils.isEmpty(volumeUuid)) {
+              return new File("/data");
+          } else {
+              return new File("/mnt/expand/" + volumeUuid);
+          }
+      }
+
+
+      public static File getDataAppDirectory(String volumeUuid) {
+          return new File(getDataDirectory(volumeUuid), "app");
+      }
+```
+buildStageDir方法执行后得到了路径字符串：
+
+```shell
+/data/app/vmdl<回话ID>.tmp
+```
+prepareStageDir将创建了这个文件夹，并设置了755权限。
+
+继续分析copyApk：
+
+```java
+final IParcelFileDescriptorFactory target = new IParcelFileDescriptorFactory.Stub() {
+               @Override
+               public ParcelFileDescriptor open(String name, int mode) throws RemoteException {
+                   if (!FileUtils.isValidExtFilename(name)) {
+                       throw new IllegalArgumentException("Invalid filename: " + name);
+                   }
+                   try {
+                       final File file = new File(codeFile, name);
+                       final FileDescriptor fd = Os.open(file.getAbsolutePath(),
+                               O_RDWR | O_CREAT, 0644);
+                       Os.chmod(file.getAbsolutePath(), 0644);
+                       return new ParcelFileDescriptor(fd);
+                   } catch (ErrnoException e) {
+                       throw new RemoteException("Failed to open: " + e.getMessage());
+                   }
+               }
+           };
+
+           int ret = PackageManager.INSTALL_SUCCEEDED;
+           ret = imcs.copyPackage(origin.file.getAbsolutePath(), target);
+           if (ret != PackageManager.INSTALL_SUCCEEDED) {
+               Slog.e(TAG, "Failed to copy package");
+               return ret;
+           }
+```
+
+调用DefaultContainerService的copyPackage方法将要安装的apk拷贝到前面创建的目录中，并设置权限为644，执行到这里就把base.apk拷贝到
+
+```shell
+/data/app/vmdl<回话ID>.tmp
+```
+中，并设置权限为644了。
+
+继续分析copyApk：
+
+```java
+final File libraryRoot = new File(codeFile, LIB_DIR_NAME);
+           NativeLibraryHelper.Handle handle = null;
+           try {
+               handle = NativeLibraryHelper.Handle.create(codeFile);
+               ret = NativeLibraryHelper.copyNativeBinariesWithOverride(handle, libraryRoot,
+                       abiOverride);
+           } catch (IOException e) {
+               Slog.e(TAG, "Copying native libraries failed", e);
+               ret = PackageManager.INSTALL_FAILED_INTERNAL_ERROR;
+           } finally {
+               IoUtils.closeQuietly(handle);
+           }
+
+```
+执行成功后会把app的so拷贝到：
+
+```shell
+/data/app/vmdl<回话ID>.tmp/lib/arm/
+```
+如果是x86，则arm替换为x86等。
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/PMS-7.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/PMS-8.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/PMS-9.png
+[4]: http://7xj6ce.com1.z0.glb.clouddn.com/PMS-10.png

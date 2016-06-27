@@ -1,0 +1,368 @@
+---
+layout: post
+title: Android-6.0之PMS安装APK前奏
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-06-24 14:22:50
+---
+
+前面介绍了PMS是如何启动的，现在介绍Android系统是如何安装一个APK的。
+
+<!--more-->
+
+前面介绍PMS时，已经确定了PMS会注册成为一个service,而Android系统中需要使用一个service时，通常要找到其客户端代理，然后通过其代理使用PMS提供的功能。
+
+![][1]
+
+ 如上图所示：
+1. IPackageManager使用了Android的AIDL语言定义了server要提供的业务函数，然后AIDL编译器会自动生成IPackageManager接口代码，其子类Stub继承Binder且实现了IPackageManager接口
+
+2. PMS继承Stub，所以可以作为Server端
+
+3. Stub中的一个内部类Proxy中有一个IBinder的成员变量mRemote，利用mRemote可以和Server端通信
+
+4. client端在使用的时候是使用Context.getPackageManager函数返回的ApplicationPackageManager对象来处理，ApplicationPackageManager内部成员变量mPM指向Proxy类型的对象。也就意味着可以和PMS通信了。
+
+这是一个典型的Binder服务模型，Android系统很多关键服务都是采用binder服务模型。最终上层获取到的PMS的代理是PackageManager这个抽象类的实现类ApplicationPackageManager对象。
+
+
+
+### 如何获得PMS代理对象
+
+使用下面的代码，可以获取到PMS的一个代理对象：
+```java
+Context ct = getApplicationContext();
+PackageManager pm =  ct.getPackageManager();
+```
+
+其中getPackageManager源码位置：
+```shell
+Android-6/frameworks/base/core/java/android/app/ContextImpl.java
+```
+
+实现代码如下：
+```java
+public PackageManager getPackageManager() {
+      if (mPackageManager != null) {
+          return mPackageManager;
+      }
+
+      IPackageManager pm = ActivityThread.getPackageManager();
+      if (pm != null) {
+          // Doesn't matter if we make more than one instance.
+          return (mPackageManager = new ApplicationPackageManager(this, pm));
+      }
+
+      return null;
+  }
+```
+
+ActivityThread.getPackageManager源码位置：
+```shell
+Android-6/frameworks/base/core/java/android/app/ActivityThread.java
+```
+
+```java
+public static IPackageManager getPackageManager() {
+    if (sPackageManager != null) {
+        //Slog.v("PackageManager", "returning cur default = " + sPackageManager);
+        return sPackageManager;
+    }
+    IBinder b = ServiceManager.getService("package");
+    //Slog.v("PackageManager", "default service binder = " + b);
+    sPackageManager = IPackageManager.Stub.asInterface(b);
+    //Slog.v("PackageManager", "default service = " + sPackageManager);
+    return sPackageManager;
+}
+
+```
+
+只要了解Android binder框架的，就会马上发现，这无非就是向SM查询名为"package"的服务，SM查询成功的话，返回名为"package"服务的一个引用对象，然后使用asInterface将其转换一个代理对象。
+
+PMS在向SM注册时，名字确实是"package"。
+
+```shell
+Android-6/frameworks/base/services/core/java/com/android/server/pm/PackageManagerService.java
+```
+
+```java
+public static PackageManagerService main(Context context, Installer installer,
+          boolean factoryTest, boolean onlyCore) {
+      PackageManagerService m = new PackageManagerService(context, installer,
+              factoryTest, onlyCore);
+      ServiceManager.addService("package", m);
+      return m;
+  }
+```
+对PackageManager的调用，最终都转换为对PMS的调用。
+
+### 安装apk
+
+可以使用如下代码，调用去安装一个apk文件已经在设备中的apk。
+
+```java
+   File apkfile  =  new File("/data/local/tmp/demo.apk");
+   Uri uri = Uri.fromFile(apkfile);
+   Intent intent = new Intent(Intent.ACTION_VIEW);
+   intent.setDataAndType(uri,"application/vnd.android.package-archive");
+   startActivity(intent);
+```
+源码路径：
+```shell
+Android-6/packages/apps/PackageInstaller
+```
+系统应用PackageInstaller将会响应这个intent.
+
+它的AndroidMainifest.xml中：
+
+```xml
+<activity android:name=".PackageInstallerActivity"
+                android:configChanges="orientation|keyboardHidden|screenSize"
+                android:excludeFromRecents="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.INSTALL_PACKAGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/vnd.android.package-archive" />
+            </intent-filter>
+            .......
+```
+也就是说PackageInstallerActivity会真正响应这个intent.
+
+
+PackageInstallerActivity中有两个重要的成员
+
+```java
+    PackageManager mPm;
+    PackageInstaller mInstaller;
+```
+其中mPm是PMS的代理对象，mInstaller是PackageInstallerService的代理对象。PMS类之后内聚了PackageInstallerService，在PMS启动的时候，初始化了改变量。
+
+
+当PackageInstallerActivity这个Activity启动的时候
+
+```java
+protected void onCreate(Bundle icicle) {
+        super.onCreate(icicle);
+
+        mPm = getPackageManager();
+        mInstaller = mPm.getPackageInstaller();
+
+        ..............
+```
+
+一开始便获取到了这两个对象。
+
+继续PackageInstallerActivity的onCreate：
+
+```java
+if (PackageInstaller.ACTION_CONFIRM_PERMISSIONS.equals(intent.getAction())) {
+      ...............
+      } else {
+          //走的这个分支
+          mSessionId = -1;
+          mPackageURI = intent.getData();
+          mOriginatingURI = intent.getParcelableExtra(Intent.EXTRA_ORIGINATING_URI);
+          mReferrerURI = intent.getParcelableExtra(Intent.EXTRA_REFERRER);
+      }
+.......................
+if ("package".equals(mPackageURI.getScheme())) {
+        .................
+      } else {
+        // 走的这个分支
+          mInstallFlowAnalytics.setFileUri(true);
+          final File sourceFile = new File(mPackageURI.getPath());
+          PackageParser.Package parsed = PackageUtil.getPackageInfo(sourceFile);
+
+          // Check for parse errors
+          if (parsed == null) {
+              Log.w(TAG, "Parse error when parsing manifest. Discontinuing installation");
+              showDialogInner(DLG_PACKAGE_ERROR);
+              setPmResult(PackageManager.INSTALL_FAILED_INVALID_APK);
+              mInstallFlowAnalytics.setPackageInfoObtained();
+              mInstallFlowAnalytics.setFlowFinished(
+                      InstallFlowAnalytics.RESULT_FAILED_TO_GET_PACKAGE_INFO);
+              return;
+          }
+          mPkgInfo = PackageParser.generatePackageInfo(parsed, null,
+                  PackageManager.GET_PERMISSIONS, 0, 0, null,
+                  new PackageUserState());
+          mPkgDigest = parsed.manifestDigest;
+          as = PackageUtil.getAppSnippet(this, mPkgInfo.applicationInfo, sourceFile);
+      }
+
+```
+代码逻辑还是比较好理解的，从intent获取到要安装的apk的路径。调用PackageUtil.getPackageInfo解析。
+
+其中PackageUtil.getPackageInfo：
+
+```java
+public static PackageParser.Package getPackageInfo(File sourceFile) {
+      final PackageParser parser = new PackageParser();
+      try {
+          PackageParser.Package pkg = parser.parseMonolithicPackage(sourceFile, 0);
+          parser.collectManifestDigest(pkg);
+          return pkg;
+      } catch (PackageParserException e) {
+          return null;
+      }
+  }
+```
+是不是有种熟悉的感觉，在PMS启动的时候，扫描解析APK不就用到了PackageParser吗。
+
+```shell
+ Android-6/frameworks/base/core/java/android/content/pm/PackageParser.java
+```
+
+```java
+public Package parseMonolithicPackage(File apkFile, int flags) throws PackageParserException {
+       if (mOnlyCoreApps) {
+        ....................
+       }
+       final AssetManager assets = new AssetManager();
+       try {
+           final Package pkg = parseBaseApk(apkFile, assets, flags);
+           pkg.codePath = apkFile.getAbsolutePath();
+           return pkg;
+       } finally {
+           IoUtils.closeQuietly(assets);
+       }
+   }
+```
+就是调用parseBaseApk来解析传入的apk文件，这个过程实际上就是在解析apk中AndroidMainfest.xml文件，将其中的信息村粗，并把解析结果存入PackageParser.Package对象中返回。
+
+然后将解析得到的Package对象，通过generatePackageInfo()方法转换为一个PackageInfo对象。
+
+继续PackageInstallerActivity的onCreate：
+
+```java
+// Block the install attempt on the Unknown Sources setting if necessary.
+        if (!requestFromUnknownSource) {
+            initiateInstall();
+            return;
+        }
+
+        // If the admin prohibits it, or we're running in a managed profile, just show error
+        // and exit. Otherwise show an option to take the user to Settings to change the setting.
+        final boolean isManagedProfile = mUserManager.isManagedProfile();
+        if (!unknownSourcesAllowedByAdmin
+                || (!unknownSourcesAllowedByUser && isManagedProfile)) {
+            showDialogInner(DLG_ADMIN_RESTRICTS_UNKNOWN_SOURCES);
+            mInstallFlowAnalytics.setFlowFinished(
+                    InstallFlowAnalytics.RESULT_BLOCKED_BY_UNKNOWN_SOURCES_SETTING);
+        } else if (!unknownSourcesAllowedByUser) {
+            // Ask user to enable setting first
+            showDialogInner(DLG_UNKNOWN_SOURCES);
+            mInstallFlowAnalytics.setFlowFinished(
+                    InstallFlowAnalytics.RESULT_BLOCKED_BY_UNKNOWN_SOURCES_SETTING);
+        } else {
+            initiateInstall();
+        }
+```
+requestFromUnknownSource为true,因为我们确实是从未知来源安装的，没有通过内置的应用商店安装。
+
+这里做一些检查，例如如果没有在设置中打开允许安装位置来源，这样就要弹出一个提示框，然后用户去设置中打开允许位置来源安装。
+
+最终都是调用initiateInstall这个方法的。
+
+```java
+private void initiateInstall() {
+        String pkgName = mPkgInfo.packageName;
+        // Check if there is already a package on the device with this name
+        // but it has been renamed to something else.
+        String[] oldName = mPm.canonicalToCurrentPackageNames(new String[] { pkgName });
+        if (oldName != null && oldName.length > 0 && oldName[0] != null) {
+            pkgName = oldName[0];
+            mPkgInfo.packageName = pkgName;
+            mPkgInfo.applicationInfo.packageName = pkgName;
+        }
+        // Check if package is already installed. display confirmation dialog if replacing pkg
+        try {
+            // This is a little convoluted because we want to get all uninstalled
+            // apps, but this may include apps with just data, and if it is just
+            // data we still want to count it as "installed".
+            mAppInfo = mPm.getApplicationInfo(pkgName,
+                    PackageManager.GET_UNINSTALLED_PACKAGES);
+            if ((mAppInfo.flags&ApplicationInfo.FLAG_INSTALLED) == 0) {
+                mAppInfo = null;
+            }
+        } catch (NameNotFoundException e) {
+            mAppInfo = null;
+        }
+
+        mInstallFlowAnalytics.setReplace(mAppInfo != null);
+        mInstallFlowAnalytics.setSystemApp(
+                (mAppInfo != null) && ((mAppInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0));
+
+        startInstallConfirm();
+    }
+
+```
+
+代码逻辑也很简单，主要是判断当前系统中是否已经安装这个app，安装过的话，设置替换flag等信息，然后调用startInstallConfirm，会弹出一个对话框，询问是否需要安装此应用吗，以及这个app将获得哪些权限等。
+
+因为前面已经解析过该apk了，所以显示其有哪些权限就很简单。
+
+当点击确定按钮的时候，执行下面的代码：
+```java
+public void onClick(View v) {
+    if (v == mOk) {
+        if (mOkCanInstall || mScrollView == null) {
+            mInstallFlowAnalytics.setInstallButtonClicked();
+            if (mSessionId != -1) {
+                .................
+            } else {
+              // 走这个分支
+                startInstall();
+            }
+        } else {
+            mScrollView.pageScroll(View.FOCUS_DOWN);
+        }
+    } else if(v == mCancel) {
+      ........................
+    }
+}
+```
+主要工作由startInstall()完成：
+
+```java
+private void startInstall() {
+      // Start subactivity to actually install the application
+      Intent newIntent = new Intent();
+      newIntent.putExtra(PackageUtil.INTENT_ATTR_APPLICATION_INFO,
+              mPkgInfo.applicationInfo);
+      newIntent.setData(mPackageURI);
+      newIntent.setClass(this, InstallAppProgress.class);
+      newIntent.putExtra(InstallAppProgress.EXTRA_MANIFEST_DIGEST, mPkgDigest);
+      newIntent.putExtra(
+              InstallAppProgress.EXTRA_INSTALL_FLOW_ANALYTICS, mInstallFlowAnalytics);
+      String installerPackageName = getIntent().getStringExtra(
+              Intent.EXTRA_INSTALLER_PACKAGE_NAME);
+      if (mOriginatingURI != null) {
+          newIntent.putExtra(Intent.EXTRA_ORIGINATING_URI, mOriginatingURI);
+      }
+      if (mReferrerURI != null) {
+          newIntent.putExtra(Intent.EXTRA_REFERRER, mReferrerURI);
+      }
+      if (mOriginatingUid != VerificationParams.NO_UID) {
+          newIntent.putExtra(Intent.EXTRA_ORIGINATING_UID, mOriginatingUid);
+      }
+      if (installerPackageName != null) {
+          newIntent.putExtra(Intent.EXTRA_INSTALLER_PACKAGE_NAME,
+                  installerPackageName);
+      }
+      if (getIntent().getBooleanExtra(Intent.EXTRA_RETURN_RESULT, false)) {
+          newIntent.putExtra(Intent.EXTRA_RETURN_RESULT, true);
+          newIntent.addFlags(Intent.FLAG_ACTIVITY_FORWARD_RESULT);
+      }
+      if(localLOGV) Log.i(TAG, "downloaded app uri="+mPackageURI);
+      startActivity(newIntent);
+      finish();
+  }
+}
+```
+这里创建一个Intent，设置数据和哪个发送给哪个class，调用 startActivity(newIntent)，启动InstallAppProgress.
+
+
+[1]:http://7xj6ce.com1.z0.glb.clouddn.com/PMS-5.png

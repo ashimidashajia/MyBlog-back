@@ -1,0 +1,396 @@
+---
+layout: post
+title: Android-6.0之PMS解析上篇
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-06-21 11:41:55
+---
+
+前面介绍了pm命令如何使用以及PMS运行时的一些规则和行为，现在就可以尽情享受PMS的代码了。
+
+<!--more-->
+
+
+### PMS的入口点
+
+PMS是由SystemServer启动的。
+
+```shell
+Android6.0/frameworks/base/services/java/com/android/server/SystemServer.java
+```
+
+```java
+private void startBootstrapServices(){
+
+ // Wait for installd to finish starting up so that it has a chance to
+        // create critical directories such as /data/user with the appropriate
+        // permissions.  We need this to complete before we initialize other services.
+
+Installer installer = mSystemServiceManager.startService(Installer.class);
+......................................
+
+ // Start the package manager.
+        Slog.i(TAG, "Package Manager");
+        mPackageManagerService = PackageManagerService.main(mSystemContext, installer,
+                mFactoryTestMode != FactoryTest.FACTORY_TEST_OFF, mOnlyCore);
+        mFirstBoot = mPackageManagerService.isFirstBoot();
+        mPackageManager = mSystemContext.getPackageManager();
+......................................
+}
+```
+这样就找到了分析PMS的入口点：
+
+```java
+Android6.0/frameworks/base/services/core/java/com/android/server/pm/PackageManagerService.java的main方法
+```
+
+main函数中的第二个参数installer负责和native层中的installd守护进程进行socket通信，这里在启动Installer 的时候会有installd创建一些关键目录，后续会详细介绍installd守护进程。
+
+第四个参数mOnlyCore用于判断是否仅仅扫描系统的目录,只有在与data分区加解密时才会设置为true，其他情况一般都为false。
+
+main函数也很简单如下所示：
+
+```java
+  public static PackageManagerService main(Context context, Installer installer,
+            boolean factoryTest, boolean onlyCore) {
+        PackageManagerService m = new PackageManagerService(context, installer,
+                factoryTest, onlyCore);
+        ServiceManager.addService("package", m);
+        return m;
+    }
+```
+这里主要做了两件事：
+
+1. 创建PackageManagerService对象，也就是PMS的实体
+
+2. 将PMS向SMS中注册，即加入SMS中，方便后续其他进程或者app通过SMS获得PMS服务
+
+PMS的构造函数中，做了大量的工作，总结起来就是扫描Android系统中的apk,并且建立相应的数据结构去管理Package的信息，四大组件的信息，权限信息等内容。
+
+
+### PMS构造函数分析之Settings
+
+源码：
+
+```java
+        mLazyDexOpt = "eng".equals(SystemProperties.get("ro.build.type"));
+        mMetrics = new DisplayMetrics();
+        mSettings = new Settings(mPackages);
+        mSettings.addSharedUserLPw("android.uid.system", Process.SYSTEM_UID,
+                ApplicationInfo.FLAG_SYSTEM, ApplicationInfo.PRIVATE_FLAG_PRIVILEGED);
+        mSettings.addSharedUserLPw("android.uid.phone", RADIO_UID,
+                ApplicationInfo.FLAG_SYSTEM, ApplicationInfo.PRIVATE_FLAG_PRIVILEGED);
+        mSettings.addSharedUserLPw("android.uid.log", LOG_UID,
+                ApplicationInfo.FLAG_SYSTEM, ApplicationInfo.PRIVATE_FLAG_PRIVILEGED);
+        mSettings.addSharedUserLPw("android.uid.nfc", NFC_UID,
+                ApplicationInfo.FLAG_SYSTEM, ApplicationInfo.PRIVATE_FLAG_PRIVILEGED);
+        mSettings.addSharedUserLPw("android.uid.bluetooth", BLUETOOTH_UID,
+                ApplicationInfo.FLAG_SYSTEM, ApplicationInfo.PRIVATE_FLAG_PRIVILEGED);
+        mSettings.addSharedUserLPw("android.uid.shell", SHELL_UID,
+                ApplicationInfo.FLAG_SYSTEM, ApplicationInfo.PRIVATE_FLAG_PRIVILEGED);
+```
+
+首先判断build类型，build有三种：user,userdebug,eng。当为eng时，意味着不需要进行odex优化。
+
+接着创建一个DisplayMetrics对象，用于保存屏幕像素参数。
+
+然后就是本次分析的重点Settings了.
+
+#### 创建一个Settings对象。
+
+源码路径：
+
+```Sshell
+Android6.0/frameworks/base/services/core/java/com/android/server/pm/Settings.java
+```
+其构造方法：
+
+```java
+    Settings(Object lock) {
+        this(Environment.getDataDirectory(), lock);
+    }
+
+    Settings(File dataDir, Object lock) {
+        mLock = lock;
+
+        mRuntimePermissionsPersistence = new RuntimePermissionPersistence(mLock);
+
+        mSystemDir = new File(dataDir, "system");
+        mSystemDir.mkdirs();
+        FileUtils.setPermissions(mSystemDir.toString(),
+                FileUtils.S_IRWXU|FileUtils.S_IRWXG
+                |FileUtils.S_IROTH|FileUtils.S_IXOTH,
+                -1, -1);
+        mSettingsFilename = new File(mSystemDir, "packages.xml");
+        mBackupSettingsFilename = new File(mSystemDir, "packages-backup.xml");
+        mPackageListFilename = new File(mSystemDir, "packages.list");
+        FileUtils.setPermissions(mPackageListFilename, 0640, SYSTEM_UID, PACKAGE_INFO_GID);
+
+        // Deprecated: Needed for migration
+        mStoppedPackagesFilename = new File(mSystemDir, "packages-stopped.xml");
+        mBackupStoppedPackagesFilename = new File(mSystemDir, "packages-stopped-backup.xml");
+    }
+
+```
+dataDir为
+
+```shell
+/data
+```
+
+所以mSystemDir为
+
+```shell
+/data/system
+```
+
+该构造函数中主要创建了前面文章中介绍的关于PMS的若干配置文件的File对象，并且设置了权限等。
+
+#### mSettings.addSharedUserLPw
+
+addSharedUserLPw方法：
+
+```java
+SharedUserSetting addSharedUserLPw(String name, int uid, int pkgFlags, int pkgPrivateFlags) {
+        SharedUserSetting s = mSharedUsers.get(name);
+        if (s != null) {
+            if (s.userId == uid) {
+                return s;
+            }
+            PackageManagerService.reportSettingsProblem(Log.ERROR,
+                    "Adding duplicate shared user, keeping first: " + name);
+            return null;
+        }
+        s = new SharedUserSetting(name, pkgFlags, pkgPrivateFlags);
+        s.userId = uid;
+        if (addUserIdLPw(uid, s, name)) {
+            mSharedUsers.put(name, s);
+            return s;
+        }
+        return null;
+    }
+```
+
+该方法主要是创建共享UID的相关信息。
+
+这里先以name为key在mSharedUsers中查看找是否已经有名为name的共享UID了。如果有的话，判断此UID和传入的uid是否相等，不相等的就报错。这意味着，不能对已有的共享UID信息，绑定新的uid。
+
+如果没有的话，创建一个新的SharedUserSetting，并将其加入mSharedUsers中去。
+
+pkgFlags为ApplicationInfo.FLAG_SYSTEM表明该app是system app.
+
+pkgPrivateFlags为ApplicationInfo.PRIVATE_FLAG_PRIVILEGED表明具备system权限。
+
+
+```java
+    private boolean addUserIdLPw(int uid, Object obj, Object name) {
+        if (uid > Process.LAST_APPLICATION_UID) {
+            return false;
+        }
+
+        if (uid >= Process.FIRST_APPLICATION_UID) {
+            int N = mUserIds.size();
+            final int index = uid - Process.FIRST_APPLICATION_UID;
+            while (index >= N) {
+                mUserIds.add(null);
+                N++;
+            }
+            if (mUserIds.get(index) != null) {
+                PackageManagerService.reportSettingsProblem(Log.ERROR,
+                        "Adding duplicate user id: " + uid
+                        + " name=" + name);
+                return false;
+            }
+            mUserIds.set(index, obj);
+        } else {
+            if (mOtherUserIds.get(uid) != null) {
+                PackageManagerService.reportSettingsProblem(Log.ERROR,
+                        "Adding duplicate shared id: " + uid
+                                + " name=" + name);
+                return false;
+            }
+            mOtherUserIds.put(uid, obj);
+        }
+        return true;
+    }
+```
+主要针对普通uid和system uid进行不同处理。
+
+每个普通的app安装的时候，都会被分配一个uid，这和Android系统一些系统服务和具备高权限的app的uid是不在一个区间的。
+
+普通的app的uid加入mUsrIds，其他的加入mOtherUserIds.
+
+
+
+PMS构造方法中创建了android.uid.system,android.uid.phone,android.uid.log,android.uid.nfc,android.uid.bluetooth,android.uid.shell这些共享uid。主要给以下场景使用提供便利：
+
+在一些系统app的AndroidManifest.xml中会有下面的信息：
+```java
+android:sharedUserId="android.uis.system"
+```
+或者android.uid.phone等，如果不提前创建好，就没办法拥有这些共享uid所具备的权限了。
+
+
+#### 创建dexopt优化器对象
+
+源码：
+
+```java
+    mInstaller = installer;
+    mPackageDexOptimizer = new PackageDexOptimizer(this);
+    mMoveCallbacks = new MoveCallbacks(FgThread.get().getLooper());
+
+    mOnPermissionChangeListeners = new OnPermissionChangeListeners(
+            FgThread.get().getLooper());
+```
+mInstaller是传入的与installd守护进程通信的installer。
+
+创建PackageDexOptimizer对象，该类主要用来执行ART中的patchoat命令，用来对oat文件的偏移值进行随机化。该类是Android M 中才有的。
+
+创建监听权限更显的监听者。因为Android M中允许动态修改App权限。
+
+
+#### 创建和初始化SystemConfig
+
+源码：
+
+```java
+SystemConfig systemConfig = SystemConfig.getInstance();
+mGlobalGids = systemConfig.getGlobalGids();
+mSystemPermissions = systemConfig.getSystemPermissions();
+mAvailableFeatures = systemConfig.getAvailableFeatures();
+```
+SystemConfig会读取
+
+```shell
+/system/etc/permissions
+```
+文件夹中的相关文件。
+
+看看其构造方法：
+
+```java
+SystemConfig() {
+        // Read configuration from system
+        readPermissions(Environment.buildPath(
+                Environment.getRootDirectory(), "etc", "sysconfig"), false);
+        // Read configuration from the old permissions dir
+        readPermissions(Environment.buildPath(
+                Environment.getRootDirectory(), "etc", "permissions"), false);
+        // Only read features from OEM config
+        readPermissions(Environment.buildPath(
+                Environment.getOemDirectory(), "etc", "sysconfig"), true);
+        readPermissions(Environment.buildPath(
+                Environment.getOemDirectory(), "etc", "permissions"), true);
+    }
+```
+
+其中rootDirectory是“/system”.oemDirectory是”/oem".也就是会尝试依次读取
+
+```shell
+/system/etc/sysconfig
+/system/etc/permissions
+/oem/etc/sysconfig
+/oem/etc/permissions
+```
+这四个目录中的permission文件。
+
+permission文件的读取是通过readPermissions函数完成的：
+
+```java
+void readPermissions(File libraryDir, boolean onlyFeatures) {
+     // Read permissions from given directory.
+     if (!libraryDir.exists() || !libraryDir.isDirectory()) {
+         if (!onlyFeatures) {
+             Slog.w(TAG, "No directory " + libraryDir + ", skipping");
+         }
+         return;//如果文件夹不存在，或者其不是一个文件夹，退出
+     }
+     if (!libraryDir.canRead()) {
+         Slog.w(TAG, "Directory " + libraryDir + " cannot be read");
+         return;//如果不可读，则退出
+     }
+
+     // Iterate over the files in the directory and scan .xml files
+     File platformFile = null;
+     for (File f : libraryDir.listFiles()) {
+         // We'll read platform.xml last
+         if (f.getPath().endsWith("etc/permissions/platform.xml")) {
+             platformFile = f;
+             continue;//先不处理platform.xml，最后会单独处理
+         }
+
+         if (!f.getPath().endsWith(".xml")) {
+             Slog.i(TAG, "Non-xml file " + f + " in " + libraryDir + " directory, ignoring");
+             continue;//只处理xml文件
+         }
+         if (!f.canRead()) {
+             Slog.w(TAG, "Permissions library file " + f + " cannot be read");
+             continue;//如果xml文件不可读，跳过
+         }
+
+         readPermissionsFromXml(f, onlyFeatures);//解析xml文件
+     }
+
+     // Read platform permissions last so it will take precedence
+     if (platformFile != null) {
+        //最后单独处理platform.xml文件
+         readPermissionsFromXml(platformFile, onlyFeatures);
+     }
+```
+
+readPermissions方法的作用就是读取指定目录下的xml文件，然后调用readPermissionsFromXml方法来解析xml文件。
+
+这些xml文件中指明了当前设备的硬件特性：
+
+```xml
+<permissions>
+    <feature name="android.hardware.nfc" />
+</permissions>
+```
+解析后，存储在ArrayMap<String, FeatureInfo>类型的变量mAvailableFeatures中。
+
+还可能指明了一些运行行时除了加载framework中的库之外，还要加载的一些java库：
+
+```xml
+<permissions>
+ <library name="com.qualcomm.qcrilhook"
+          file="/system/framework/qcrilhook.jar"/>
+</permissions>
+```
+
+这些library字段中的name属性值，将会存放到PMS的成员变量mSharedLibrsries中。
+
+其中platform中，指明了当前设备中定义的相关权限：
+
+```xml
+..................
+
+<permission name="android.permission.BLUETOOTH_ADMIN" >
+       <group gid="net_bt_admin" />
+</permission>
+
+..................
+<assign-permission name="android.permission.MODIFY_AUDIO_SETTINGS" uid="media" />
+..................
+```
+
+其中permission表示name中的字符串表示的权限赋予group标签中的属性gid中的用户组。解析的时候，创建一个PermissionEntry,它是SystemConfig的一个内部类
+
+```java
+public static final class PermissionEntry {
+    public final String name;
+    public int[] gids;
+    public boolean perUser;
+
+    PermissionEntry(String name, boolean perUser) {
+        this.name = name;
+        this.perUser = perUser;
+    }
+}
+```
+
+SystemConfig中有一个ArrayMap<String, PermissionEntry>的mPermissions变量，创建的PermissionEntry会存入该变量中。而group中的uid则会保存在SystemConfig中的mGlobalGids整型数组中。
+
+
+assign-permission表示把属性name中的字符串表示的权限赋予属性uid中的用户。uid和name则存入SystemConfig中的SparseArray<ArraySet<String>> 类型的mSystemPermissions变量中。

@@ -1,0 +1,70 @@
+---
+layout: post
+title: 查看Android系统分区
+categories: Android底层开发
+tags: [Android刷机]
+date: 2016-02-01 14:17:27
+---
+
+
+
+
+如果知道了android手机的分区情况，就能在危机时刻派上大用处了！！
+提醒一下最好具有root权限，否则可能无法查看分区信息。连接USB线，打开USB调试功能。
+<!--more-->
+首先进入shell终端：
+
+    adb shell
+然后输入：
+
+    cat /proc/parttitions
+
+可以看到如下图所示得分区信息。
+  ![/proc/parttitions][1]
+
+不过似乎这不直观，鬼知道这里面得哪个代表recover分区，哪个代表system分区等等呢。
+接下来输入：
+
+    cat /proc/mounts
+会看到如下图所示：
+![/proc/mounts][2]
+
+最后输入：
+
+    $ ls /dev/block/platform/msm_sdcc.1/by-name/ -l
+就可以看到详细的分区信息啦：
+
+    shell@jftddxx:/ $ ls /dev/block/platform/msm_sdcc.1/by-name/ -l
+    lrwxrwxrwx root     root              2015-05-19 16:54 aboot -> /dev/block/mmcblk0p6
+    lrwxrwxrwx root     root              2015-05-19 16:54 apnhlos -> /dev/block/mmcblk0p1
+    lrwxrwxrwx root     root              2015-05-19 16:54 backup -> /dev/block/mmcblk0p23
+    lrwxrwxrwx root     root              2015-05-19 16:54 boot -> /dev/block/mmcblk0p20
+    lrwxrwxrwx root     root              2015-05-19 16:54 cache -> /dev/block/mmcblk0p18
+    lrwxrwxrwx root     root              2015-05-19 16:54 carrier -> /dev/block/mmcblk0p28
+    lrwxrwxrwx root     root              2015-05-19 16:54 efs -> /dev/block/mmcblk0p10
+    lrwxrwxrwx root     root              2015-05-19 16:54 fota -> /dev/block/mmcblk0p22
+    lrwxrwxrwx root     root              2015-05-19 16:54 fsg -> /dev/block/mmcblk0p24
+    lrwxrwxrwx root     root              2015-05-19 16:54 hidden -> /dev/block/mmcblk0p27
+    lrwxrwxrwx root     root              2015-05-19 16:54 m9kefs1 -> /dev/block/mmcblk0p13
+    lrwxrwxrwx root     root              2015-05-19 16:54 m9kefs2 -> /dev/block/mmcblk0p14
+    lrwxrwxrwx root     root              2015-05-19 16:54 m9kefs3 -> /dev/block/mmcblk0p15
+    lrwxrwxrwx root     root              2015-05-19 16:54 mdm -> /dev/block/mmcblk0p2
+    lrwxrwxrwx root     root              2015-05-19 16:54 modemst1 -> /dev/block/mmcblk0p11
+    lrwxrwxrwx root     root              2015-05-19 16:54 modemst2 -> /dev/block/mmcblk0p12
+    lrwxrwxrwx root     root              2015-05-19 16:54 pad -> /dev/block/mmcblk0p9
+    lrwxrwxrwx root     root              2015-05-19 16:54 param -> /dev/block/mmcblk0p19
+    lrwxrwxrwx root     root              2015-05-19 16:54 persdata -> /dev/block/mmcblk0p26
+    lrwxrwxrwx root     root              2015-05-19 16:54 persist -> /dev/block/mmcblk0p17
+    lrwxrwxrwx root     root              2015-05-19 16:54 recovery -> /dev/block/mmcblk0p21
+    lrwxrwxrwx root     root              2015-05-19 16:54 rpm -> /dev/block/mmcblk0p7
+    lrwxrwxrwx root     root              2015-05-19 16:54 sbl1 -> /dev/block/mmcblk0p3
+    lrwxrwxrwx root     root              2015-05-19 16:54 sbl2 -> /dev/block/mmcblk0p4
+    lrwxrwxrwx root     root              2015-05-19 16:54 sbl3 -> /dev/block/mmcblk0p5
+    lrwxrwxrwx root     root              2015-05-19 16:54 ssd -> /dev/block/mmcblk0p25
+    lrwxrwxrwx root     root              2015-05-19 16:54 system -> /dev/block/mmcblk0p16
+    lrwxrwxrwx root     root              2015-05-19 16:54 tz -> /dev/block/mmcblk0p8
+    lrwxrwxrwx root     root              2015-05-19 16:54 userdata -> /dev/block/mmcblk0p29
+
+
+  [1]: http://7xj6ce.com1.z0.glb.clouddn.com/cha-kan-fen-qu-xin-xi-1.png
+  [2]: http://7xj6ce.com1.z0.glb.clouddn.com/cha-kan-fen-qu-xin-xi-2.png

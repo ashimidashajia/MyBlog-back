@@ -26,10 +26,6 @@ date: 2015-09-15 15:36:23
 ```shell
   cp git-repo/repo ~/bin/
 ```
-3）修改repo文件，设置REPO_URL如下：
-```shell
-  REPO_URL = 'git://aosp.tuna.tsinghua.edu.cn/android/git-repo'
-```
 
 ## 初始化repo
 1）创建目录
@@ -37,9 +33,22 @@ date: 2015-09-15 15:36:23
   mkdir ~/aosp
 ```
 2）初始化repo
+
+初始化仓库：
+
+```bash
+repo init -u https://aosp.tuna.tsinghua.edu.cn/platform/manifest
+
+## 如果提示无法连接到 gerrit.googlesource.com，可以编辑 ~/bin/repo，把 REPO_URL 一行替换成下面的：
+REPO_URL = 'https://gerrit-google.tuna.tsinghua.edu.cn/git-repo'
+
+```
+
+如果需要某个特定的 Android 版本([列表][1])：
+
 ```shell
 cd ~/aosp 
-repo init -u git://aosp.tuna.tsinghua.edu.cn/android/platform/manifest -b android-5.1.0_r3
+repo init -u https://aosp.tuna.tsinghua.edu.cn/platform/manifest  -b android-5.1.0_r3
 ```
 
 ps:在初始化时，提示需要email验证，使用如下命令：
@@ -59,7 +68,7 @@ ps:在初始化时，提示需要email验证，使用如下命令：
 改为下面的code即可： 
 ```xml
  <remote  name="aosp"
-       fetch="git://aosp.tuna.tsinghua.edu.cn/android/"
+       fetch="https://aosp.tuna.tsinghua.edu.cn"
        review="https://android-review.googlesource.com/" />
 ```
 这个方法也可以用来在同步Cyanogenmod代码的时候从TUNA同步部分代码
@@ -72,7 +81,7 @@ ps:在初始化时，提示需要email验证，使用如下命令：
 我是一次就下载成功了！！！共计31G。
 
  
-
+[1]: https://source.android.com/source/build-numbers.html#source-code-tags-and-builds
 
 
 

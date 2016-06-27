@@ -1,0 +1,703 @@
+---
+layout: post
+title: Android-6.0之PMS解析中篇1
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-06-21 15:16:35
+---
+
+本篇文章主要介绍PMS扫描和解析APK文件。
+
+<!--more-->
+
+继续分析PMS的构造方法。
+
+```java
+  mHandlerThread = new ServiceThread(TAG,
+  Process.THREAD_PRIORITY_BACKGROUND, true /*allowIo*/);
+  mHandlerThread.start();
+  mHandler = new PackageHandler(mHandlerThread.getLooper());
+  Watchdog.getInstance().addThread(mHandler, WATCHDOG_TIMEOUT);
+
+  File dataDir = Environment.getDataDirectory();
+  mAppDataDir = new File(dataDir, "data");
+  mAppInstallDir = new File(dataDir, "app");
+  mAppLib32InstallDir = new File(dataDir, "app-lib");
+  mAsecInternalPath = new File(dataDir, "app-asec").getPath();
+  mUserAppDataDir = new File(dataDir, "user");
+  mDrmAppPrivateInstallDir = new File(dataDir, "app-private");
+
+  sUserManager = new UserManagerService(context, this,
+  mInstallLock, mPackages);
+```
+
+创建PackageHandler对象，建立PackageHandler的消息循环，用于处理apk的安装请求。
+
+为"/data"目录下的子目录生成文件对象：
+
+```shell
+/data/data
+/data/app
+/data/app-lib
+/data/user
+/data/app-private
+```
+创建用户管理服务UserManagerService：
+
+继续PMS构造方法：
+
+```java
+// Propagate permission configuration in to package manager.
+    ArrayMap<String, SystemConfig.PermissionEntry> permConfig
+            = systemConfig.getPermissions();
+    for (int i=0; i<permConfig.size(); i++) {
+        SystemConfig.PermissionEntry perm = permConfig.valueAt(i);
+        BasePermission bp = mSettings.mPermissions.get(perm.name);
+        if (bp == null) {
+            bp = new BasePermission(perm.name, "android", BasePermission.TYPE_BUILTIN);
+            mSettings.mPermissions.put(perm.name, bp);
+        }
+        if (perm.gids != null) {
+            bp.setGids(perm.gids, perm.perUser);
+        }
+    }
+
+    ArrayMap<String, String> libConfig = systemConfig.getSharedLibraries();
+    for (int i=0; i<libConfig.size(); i++) {
+        mSharedLibraries.put(libConfig.keyAt(i),
+                new SharedLibraryEntry(libConfig.valueAt(i), null));
+    }
+
+    mFoundPolicyFile = SELinuxMMAC.readInstallPolicy();
+
+```
+作用是将前面从/system/etc/permission里面读取到的permission的name和对应的gid放入到bp中,然后保存在mSettings的mPermissions中.
+
+也要把从/system/etc/permission中读取到的shared library 放到PMS的变量mSharedLibraries中去。
+
+继续
+
+```java
+mRestoredSettings = mSettings.readLPw(this, sUserManager.getUsers(false),
+        mSdkVersion, mOnlyCore);
+
+String customResolverActivity = Resources.getSystem().getString(
+        R.string.config_customResolverActivity);
+if (TextUtils.isEmpty(customResolverActivity)) {
+    customResolverActivity = null;
+} else {
+    mCustomResolverComponentName = ComponentName.unflattenFromString(
+            customResolverActivity);
+}
+
+```
+这里首先调用Settings的readLPw函数去解析packages.xml和packages-backup.xml保存的安装列表信息，并把解析的pakcages信息添加到相应的数据结构中。
+
+这里我们先假设这是Android设备第一次开机，所有packages.xml和packages-backup.xml文件都还不存在。所以Settings的readLPw函数会直接返回。
+
+继续：
+
+```java
+long startTime = SystemClock.uptimeMillis(); // 获取当前时间
+
+EventLog.writeEvent(EventLogTags.BOOT_PROGRESS_PMS_SYSTEM_SCAN_START,
+       startTime);
+
+// Set flag to monitor and not change apk file paths when
+// scanning install directories.
+final int scanFlags = SCAN_NO_PATHS | SCAN_DEFER_DEX | SCAN_BOOTING | SCAN_INITIAL;//设置扫描模式
+
+final ArraySet<String> alreadyDexOpted = new ArraySet<String>();// 存储已经优化的文件
+
+/**
+* Add everything in the in the boot class path to the
+* list of process files because dexopt will have been run
+* if necessary during zygote startup.
+*/
+final String bootClassPath = System.getenv("BOOTCLASSPATH");//获取BOOTCLASSPATH环境变量的值
+final String systemServerClassPath = System.getenv("SYSTEMSERVERCLASSPATH");//获取SYSTEMSERVERCLASSPATH环境变量的值
+
+if (bootClassPath != null) {
+   String[] bootClassPathElements = splitString(bootClassPath, ':');
+   for (String element : bootClassPathElements) {
+       alreadyDexOpted.add(element); //将BOOTCLASSPATH中的指明的文件加入已经优化的文件列表中
+   }
+} else {
+   Slog.w(TAG, "No BOOTCLASSPATH found!");
+}
+
+if (systemServerClassPath != null) {
+   String[] systemServerClassPathElements = splitString(systemServerClassPath, ':');
+   for (String element : systemServerClassPathElements) {
+       alreadyDexOpted.add(element);//将SYSTEMSERVERCLASSPATH中的文件加入已经优化的文件列表中
+   }
+} else {
+   Slog.w(TAG, "No SYSTEMSERVERCLASSPATH found!");
+}
+```
+该段代码主要是把BOOTCLASSPATH和SYSTEMSERVERCLASSPATH里面的文件添加到alreadyDexOpted这个HashSet中，因为它们在zygote启动时已经进过Dex优化了。
+
+继续
+
+```java
+final List<String> allInstructionSets = InstructionSets.getAllInstructionSets();
+final String[] dexCodeInstructionSets =
+        getDexCodeInstructionSets(
+                allInstructionSets.toArray(new String[allInstructionSets.size()]));
+
+/**
+ * Ensure all external libraries have had dexopt run on them.
+ */
+if (mSharedLibraries.size() > 0) {
+    // NOTE: For now, we're compiling these system "shared libraries"
+    // (and framework jars) into all available architectures. It's possible
+    // to compile them only when we come across an app that uses them (there's
+    // already logic for that in scanPackageLI) but that adds some complexity.
+    for (String dexCodeInstructionSet : dexCodeInstructionSets) {
+        for (SharedLibraryEntry libEntry : mSharedLibraries.values()) {
+            final String lib = libEntry.path;
+            if (lib == null) {
+                continue;
+            }
+
+            try {
+                int dexoptNeeded = DexFile.getDexOptNeeded(lib, null, dexCodeInstructionSet, false);
+                if (dexoptNeeded != DexFile.NO_DEXOPT_NEEDED) {
+                    alreadyDexOpted.add(lib);
+                    mInstaller.dexopt(lib, Process.SYSTEM_UID, true, dexCodeInstructionSet, dexoptNeeded);
+                }
+            } catch (FileNotFoundException e) {
+                Slog.w(TAG, "Library not found: " + lib);
+            } catch (IOException e) {
+                Slog.w(TAG, "Cannot dexopt " + lib + "; is it an APK or JAR? "
+                        + e.getMessage());
+            }
+        }
+    }
+}
+
+```
+这里先获取当前Android设备的abi列表，也就是armeabi,armeabi-v7a,arm64-v8a等等信息。
+
+然后在每种abi情况下，利用DexFile.getDexOptNeeded检查该library是否已经执行过dexopt了。
+
+
+NO_DEXOPT_NEEDED ：if the apk/jar is already up to date.
+
+DEX2OAT_NEEDED： if dex2oat should be called on the apk/jar file.
+
+PATCHOAT_NEEDED：if patchoat should be called on the apk/jar file to patch the odex file along side the apk/jar.
+
+SELF_PATCHOAT_NEEDED if selfpatchoat should be called on the apk/jar file to patch the oat file in the dalvik cache.
+
+当结果不为NO_DEXOPT_NEEDED表明，该library需要dexopt.通过mInstaller的dexopt进行dexopt操作。
+
+继续：
+
+```java
+File frameworkDir = new File(Environment.getRootDirectory(), "framework");//"/system/framework"
+
+// Gross hack for now: we know this file doesn't contain any
+// code, so don't dexopt it to avoid the resulting log spew.
+alreadyDexOpted.add(frameworkDir.getPath() + "/framework-res.apk");
+
+// Gross hack for now: we know this file is only part of
+// the boot class path for art, so don't dexopt it to
+// avoid the resulting log spew.
+alreadyDexOpted.add(frameworkDir.getPath() + "/core-libart.jar");
+
+/**
+ * There are a number of commands implemented in Java, which
+ * we currently need to do the dexopt on so that they can be
+ * run from a non-root shell.
+ */
+String[] frameworkFiles = frameworkDir.list();
+if (frameworkFiles != null) {
+    // TODO: We could compile these only for the most preferred ABI. We should
+    // first double check that the dex files for these commands are not referenced
+    // by other system apps.
+    for (String dexCodeInstructionSet : dexCodeInstructionSets) {
+        for (int i=0; i<frameworkFiles.length; i++) {
+            File libPath = new File(frameworkDir, frameworkFiles[i]);
+            String path = libPath.getPath();
+            // Skip the file if we already did it.
+            if (alreadyDexOpted.contains(path)) {
+                continue;
+            }
+            // Skip the file if it is not a type we want to dexopt.
+            if (!path.endsWith(".apk") && !path.endsWith(".jar")) {
+                continue;//跳过那些非apk和jar的文件
+            }
+            try {
+                int dexoptNeeded = DexFile.getDexOptNeeded(path, null, dexCodeInstructionSet, false);
+                if (dexoptNeeded != DexFile.NO_DEXOPT_NEEDED) {
+                    mInstaller.dexopt(path, Process.SYSTEM_UID, true, dexCodeInstructionSet, dexoptNeeded);
+                }
+            } catch (FileNotFoundException e) {
+                Slog.w(TAG, "Jar not found: " + path);
+            } catch (IOException e) {
+                Slog.w(TAG, "Exception reading jar: " + path, e);
+            }
+        }
+    }
+}
+
+```
+将
+
+```shell
+/system/framework/framework-res.apk
+/system/framework/core-libart.jar
+```
+这两个文件加入已优化列表alreadyDexOpted中去。
+
+然后搜索/system/framework中那些还没有dexopt的jar或者apk文件，进行dexopt操作。
+
+
+继续：
+
+```java
+inal VersionInfo ver = mSettings.getInternalVersion();
+mIsUpgrade = !Build.FINGERPRINT.equals(ver.fingerprint);
+// when upgrading from pre-M, promote system app permissions from install to runtime
+mPromoteSystemApps =
+        mIsUpgrade && ver.sdkVersion <= Build.VERSION_CODES.LOLLIPOP_MR1;
+
+// save off the names of pre-existing system packages prior to scanning; we don't
+// want to automatically grant runtime permissions for new system apps
+if (mPromoteSystemApps) {
+    Iterator<PackageSetting> pkgSettingIter = mSettings.mPackages.values().iterator();
+    while (pkgSettingIter.hasNext()) {
+        PackageSetting ps = pkgSettingIter.next();
+        if (isSystemApp(ps)) {
+            mExistingSystemPackages.add(ps.name);
+        }
+    }
+}
+```
+如果是升级系统时，进行的处理，假设没有进行系统升级，则忽略这段代码。
+
+在接下来的处理中，就会遇到PMS的一个非常重要的函数：scanDirLI
+
+```java
+// Collect vendor overlay packages.
+// (Do this before scanning any apps.)
+// For security and version matching reason, only consider
+// overlay packages if they reside in VENDOR_OVERLAY_DIR.
+File vendorOverlayDir = new File(VENDOR_OVERLAY_DIR);
+scanDirLI(vendorOverlayDir, PackageParser.PARSE_IS_SYSTEM
+        | PackageParser.PARSE_IS_SYSTEM_DIR, scanFlags | SCAN_TRUSTED_OVERLAY, 0);
+
+// Find base frameworks (resource packages without code).
+scanDirLI(frameworkDir, PackageParser.PARSE_IS_SYSTEM
+        | PackageParser.PARSE_IS_SYSTEM_DIR
+        | PackageParser.PARSE_IS_PRIVILEGED,
+        scanFlags | SCAN_NO_DEX, 0);
+
+// Collected privileged system packages.
+final File privilegedAppDir = new File(Environment.getRootDirectory(), "priv-app");
+scanDirLI(privilegedAppDir, PackageParser.PARSE_IS_SYSTEM
+        | PackageParser.PARSE_IS_SYSTEM_DIR
+        | PackageParser.PARSE_IS_PRIVILEGED, scanFlags, 0);
+
+// Collect ordinary system packages.
+final File systemAppDir = new File(Environment.getRootDirectory(), "app");
+scanDirLI(systemAppDir, PackageParser.PARSE_IS_SYSTEM
+        | PackageParser.PARSE_IS_SYSTEM_DIR, scanFlags, 0);
+
+// Collect all vendor packages.
+File vendorAppDir = new File("/vendor/app");
+try {
+    vendorAppDir = vendorAppDir.getCanonicalFile();
+} catch (IOException e) {
+    // failed to look up canonical path, continue with original one
+}
+scanDirLI(vendorAppDir, PackageParser.PARSE_IS_SYSTEM
+        | PackageParser.PARSE_IS_SYSTEM_DIR, scanFlags, 0);
+
+// Collect all OEM packages.
+final File oemAppDir = new File(Environment.getOemDirectory(), "app");
+scanDirLI(oemAppDir, PackageParser.PARSE_IS_SYSTEM
+        | PackageParser.PARSE_IS_SYSTEM_DIR, scanFlags, 0);
+```
+依次调用scanDirLI方法对下列的目录中的apk文件进行扫描。
+```shell
+/vendor/overlay
+/system/framework
+/system/priv-app
+/system/app
+/vendor/app
+/oem/app
+```
+
+scanDirLI方法代码：
+
+```java
+private void scanDirLI(File dir, int parseFlags, int scanFlags, long currentTime) {
+        final File[] files = dir.listFiles();
+        if (ArrayUtils.isEmpty(files)) {
+            Log.d(TAG, "No files in app dir " + dir);
+            return;// 会从传入的dir中，遍历所有的文件，如果没有文件，则直接返回
+        }
+
+        if (DEBUG_PACKAGE_SCANNING) {
+            Log.d(TAG, "Scanning app dir " + dir + " scanFlags=" + scanFlags
+                    + " flags=0x" + Integer.toHexString(parseFlags));
+        }
+
+        for (File file : files) {// 如果有文件存在的话，就会进行遍历
+
+          // 判断一个文件是否是一个apk的文件（以apk结尾），或者是一个文件夹并且文件夹满足isStageName的条件
+            final boolean isPackage = (isApkFile(file) || file.isDirectory())
+                    && !PackageInstallerService.isStageName(file.getName());
+            if (!isPackage) {
+                // Ignore entries which are not packages
+                continue;
+            }
+            try {
+               // 会调用scanPackageLI进行接下来的解析
+                scanPackageLI(file, parseFlags | PackageParser.PARSE_MUST_BE_APK,
+                        scanFlags, currentTime, null);
+            } catch (PackageManagerException e) {
+                Slog.w(TAG, "Failed to parse " + file + ": " + e.getMessage());
+
+                // Delete invalid userdata apps
+                if ((parseFlags & PackageParser.PARSE_IS_SYSTEM) == 0 &&
+                        e.error == PackageManager.INSTALL_FAILED_INVALID_APK) {
+                    // 只有非系统的apk扫描失败的时候，才会删除该apk。
+                    logCriticalInfo(Log.WARN, "Deleting invalid package at " + file);
+                    if (file.isDirectory()) {
+                        mInstaller.rmPackageDir(file.getAbsolutePath());
+                    } else {
+                        file.delete();
+                    }
+                }
+            }
+        }
+    }
+    public static boolean isStageName(String name) {
+         final boolean isFile = name.startsWith("vmdl") && name.endsWith(".tmp");
+         final boolean isContainer = name.startsWith("smdl") && name.endsWith(".tmp");
+         final boolean isLegacyContainer = name.startsWith("smdl2tmp");
+         return isFile || isContainer || isLegacyContainer;
+     }
+```
+
+找到apk文件后，会调用scanPackageLI来解析该文件，并将该apk转换为PackageParser.Package对象。
+
+源码位置：
+
+```shell
+Android-6.0/framworks/base/core/java/android/content/pm/PackageParser.java
+```
+```java
+public final static class Package {
+
+        public String packageName;
+
+        /** Names of any split APKs, ordered by parsed splitName */
+        public String[] splitNames;
+
+        // TODO: work towards making these paths invariant
+
+        public String volumeUuid;
+
+        /**
+         * Path where this package was found on disk. For monolithic packages
+         * this is path to single base APK file; for cluster packages this is
+         * path to the cluster directory.
+         */
+        public String codePath;
+
+        /** Path of base APK */
+        public String baseCodePath;
+        /** Paths of any split APKs, ordered by parsed splitName */
+        public String[] splitCodePaths;
+
+        /** Revision code of base APK */
+        public int baseRevisionCode;
+        /** Revision codes of any split APKs, ordered by parsed splitName */
+        public int[] splitRevisionCodes;
+
+        /** Flags of any split APKs; ordered by parsed splitName */
+        public int[] splitFlags;
+        ...............................
+```
+PackageParser.Package是一个apk文件在PMS中的代表，利用pm命令获得apk的信息，就是通过该类表示的。里面记录了apk的包名等信息。
+
+
+scanPackageLI的代码量也是很大，所以也分段解析。
+
+```java
+private PackageParser.Package scanPackageLI(File scanFile, int parseFlags, int scanFlags,
+            long currentTime, UserHandle user) throws PackageManagerException {
+        if (DEBUG_INSTALL) Slog.d(TAG, "Parsing: " + scanFile);
+        parseFlags |= mDefParseFlags;
+        PackageParser pp = new PackageParser();
+        pp.setSeparateProcesses(mSeparateProcesses);
+        pp.setOnlyCoreApps(mOnlyCore);
+        pp.setDisplayMetrics(mMetrics);
+
+        if ((scanFlags & SCAN_TRUSTED_OVERLAY) != 0) {
+            parseFlags |= PackageParser.PARSE_TRUSTED_OVERLAY;
+        }
+
+        final PackageParser.Package pkg;
+        try {
+            pkg = pp.parsePackage(scanFile, parseFlags);
+        } catch (PackageParserException e) {
+            throw PackageManagerException.from(e);
+        }
+.................
+```
+scanPackageLI创建了一个文件解析器PackageParser，然后调用的解析器的parsePackage方法解析。
+
+继续scanPackageLI：
+
+```java
+
+        PackageSetting ps = null;
+        PackageSetting updatedPkg;
+        // reader
+        synchronized (mPackages) {
+            // Look to see if we already know about this package.
+            String oldName = mSettings.mRenamedPackages.get(pkg.packageName);
+            if (pkg.mOriginalPackages != null && pkg.mOriginalPackages.contains(oldName)) {
+                // This package has been renamed to its original name.  Let's
+                // use that.
+                ps = mSettings.peekPackageLPr(oldName);
+            }
+            // If there was no original package, see one for the real package name.
+            if (ps == null) {
+              //这里当设备不是第一次开机时，会解析packages.xml，将里面记录的pacakge都存储到mSettings的mPackages中，它是一个ArrayMap<String, PackageSetting>变量。
+              //以扫描到的包名检测是否已经存在ps了，PackageSetting:Settings data for a particular package we know about.
+                ps = mSettings.peekPackageLPr(pkg.packageName);
+            }
+
+```
+这里主要是处理应用升级后包名不一致的情况，当设备第一次开机时，不存在这样的情况。其他情况下，开机会解析packages.xml，当前后有apk的包名发生变化时，该app在packages.xml中会以<renamed-package>标签标记。
+而且还会把这些包名更改了的信息计入 PMS的mSettings变量的ArrayMap<String, String> 类型的变量mRenamedPackages中，key是newname.
+
+
+继续scanPackageLI：
+```java
+            // Check to see if this package could be hiding/updating a system
+            // package.  Must look for it either under the original or real
+            // package name depending on our state.
+            updatedPkg = mSettings.getDisabledSystemPkgLPr(ps != null ? ps.name : pkg.packageName);
+            if (DEBUG_INSTALL && updatedPkg != null) Slog.d(TAG, "updatedPkg = " + updatedPkg);
+        }
+        boolean updatedPkgBetter = false;
+        // First check if this is a system package that may involve an update
+        if (updatedPkg != null && (parseFlags&PackageParser.PARSE_IS_SYSTEM) != 0) {
+            // If new package is not located in "/system/priv-app" (e.g. due to an OTA),
+            // it needs to drop FLAG_PRIVILEGED.
+            if (locationIsPrivileged(scanFile)) {
+                updatedPkg.pkgPrivateFlags |= ApplicationInfo.PRIVATE_FLAG_PRIVILEGED;
+            } else {
+                updatedPkg.pkgPrivateFlags &= ~ApplicationInfo.PRIVATE_FLAG_PRIVILEGED;
+            }
+
+            if (ps != null && !ps.codePath.equals(scanFile)) {
+                // The path has changed from what was last scanned...  check the
+                // version of the new path against what we have stored to determine
+                // what to do.
+                if (DEBUG_INSTALL) Slog.d(TAG, "Path changing from " + ps.codePath);
+                if (pkg.mVersionCode <= ps.versionCode) {
+                    // The system package has been updated and the code path does not match
+                    // Ignore entry. Skip it.
+                    if (DEBUG_INSTALL) Slog.i(TAG, "Package " + ps.name + " at " + scanFile
+                            + " ignored: updated version " + ps.versionCode
+                            + " better than this " + pkg.mVersionCode);
+                    if (!updatedPkg.codePath.equals(scanFile)) {
+                        Slog.w(PackageManagerService.TAG, "Code path for hidden system pkg : "
+                                + ps.name + " changing from " + updatedPkg.codePathString
+                                + " to " + scanFile);
+                        updatedPkg.codePath = scanFile;
+                        updatedPkg.codePathString = scanFile.toString();
+                        updatedPkg.resourcePath = scanFile;
+                        updatedPkg.resourcePathString = scanFile.toString();
+                    }
+                    updatedPkg.pkg = pkg;
+                    throw new PackageManagerException(INSTALL_FAILED_DUPLICATE_PACKAGE,
+                            "Package " + ps.name + " at " + scanFile
+                                    + " ignored: updated version " + ps.versionCode
+                                    + " better than this " + pkg.mVersionCode);
+                } else {
+                    // The current app on the system partition is better than
+                    // what we have updated to on the data partition; switch
+                    // back to the system partition version.
+                    // At this point, its safely assumed that package installation for
+                    // apps in system partition will go through. If not there won't be a working
+                    // version of the app
+                    // writer
+                    synchronized (mPackages) {
+                        // Just remove the loaded entries from package lists.
+                        mPackages.remove(ps.name);
+                    }
+
+                    logCriticalInfo(Log.WARN, "Package " + ps.name + " at " + scanFile
+                            + " reverting from " + ps.codePathString
+                            + ": new version " + pkg.mVersionCode
+                            + " better than installed " + ps.versionCode);
+
+                    InstallArgs args = createInstallArgsForExisting(packageFlagsToInstallFlags(ps),
+                            ps.codePathString, ps.resourcePathString, getAppDexInstructionSets(ps));
+                    synchronized (mInstallLock) {
+                        args.cleanUpResourcesLI();
+                    }
+                    synchronized (mPackages) {
+                        mSettings.enableSystemPackageLPw(ps.name);
+                    }
+                    updatedPkgBetter = true;
+                }
+            }
+        }
+
+        if (updatedPkg != null) {
+            // An updated system app will not have the PARSE_IS_SYSTEM flag set
+            // initially
+            parseFlags |= PackageParser.PARSE_IS_SYSTEM;
+
+            // An updated privileged app will not have the PARSE_IS_PRIVILEGED
+            // flag set initially
+            if ((updatedPkg.pkgPrivateFlags & ApplicationInfo.PRIVATE_FLAG_PRIVILEGED) != 0) {
+                parseFlags |= PackageParser.PARSE_IS_PRIVILEGED;
+            }
+        }
+```
+这里是处理安装了系统更新后的，检查是否对系统app有影响。即是否将系统app更新为更高的新版本了。是的话，要处理。
+
+
+接下来是扫描apk的签名。
+
+```java
+        // Verify certificates against what was last scanned
+        collectCertificatesLI(pp, ps, pkg, scanFile, parseFlags);
+
+
+```
+
+继续scanPackageLI：
+
+```java
+        /*
+         * A new system app appeared, but we already had a non-system one of the
+         * same name installed earlier.
+         */
+        boolean shouldHideSystemApp = false;
+        if (updatedPkg == null && ps != null
+                && (parseFlags & PackageParser.PARSE_IS_SYSTEM_DIR) != 0 && !isSystemApp(ps)) {
+            /*
+             * Check to make sure the signatures match first. If they don't,
+             * wipe the installed application and its data.
+             */
+            if (compareSignatures(ps.signatures.mSignatures, pkg.mSignatures)
+                    != PackageManager.SIGNATURE_MATCH) {
+                logCriticalInfo(Log.WARN, "Package " + ps.name + " appeared on system, but"
+                        + " signatures don't match existing userdata copy; removing");
+                deletePackageLI(pkg.packageName, null, true, null, null, 0, null, false);
+                ps = null;
+            } else {
+                /*
+                 * If the newly-added system app is an older version than the
+                 * already installed version, hide it. It will be scanned later
+                 * and re-added like an update.
+                 */
+                if (pkg.mVersionCode <= ps.versionCode) {
+                    shouldHideSystemApp = true;
+                    logCriticalInfo(Log.INFO, "Package " + ps.name + " appeared at " + scanFile
+                            + " but new version " + pkg.mVersionCode + " better than installed "
+                            + ps.versionCode + "; hiding system");
+                } else {
+                    /*
+                     * The newly found system app is a newer version that the
+                     * one previously installed. Simply remove the
+                     * already-installed application and replace it with our own
+                     * while keeping the application data.
+                     */
+                    logCriticalInfo(Log.WARN, "Package " + ps.name + " at " + scanFile
+                            + " reverting from " + ps.codePathString + ": new version "
+                            + pkg.mVersionCode + " better than installed " + ps.versionCode);
+                    InstallArgs args = createInstallArgsForExisting(packageFlagsToInstallFlags(ps),
+                            ps.codePathString, ps.resourcePathString, getAppDexInstructionSets(ps));
+                    synchronized (mInstallLock) {
+                        args.cleanUpResourcesLI();
+                    }
+                }
+            }
+        }
+
+```
+这里的代码是处理这样的情景：当系统更新后，可能更新包会多出一些system app出来，那么如果此时用户恰好安装了一个同包名的app.两者的签名还不一致，那么就删除扫描到的系统应用的信息。
+
+当两者签名一致时，如果扫描到的app版本更高，那么就删除安装的应用；如果扫描的app版本低，那么隐藏扫描到的系统应用。
+
+
+继续scanPackageLI：
+
+```java
+        // The apk is forward locked (not public) if its code and resources
+        // are kept in different files. (except for app in either system or
+        // vendor path).
+        // TODO grab this value from PackageSettings
+        if ((parseFlags & PackageParser.PARSE_IS_SYSTEM_DIR) == 0) {
+            if (ps != null && !ps.codePath.equals(ps.resourcePath)) {
+                parseFlags |= PackageParser.PARSE_FORWARD_LOCK;
+            }
+        }
+
+        // TODO: extend to support forward-locked splits
+        String resourcePath = null;
+        String baseResourcePath = null;
+        if ((parseFlags & PackageParser.PARSE_FORWARD_LOCK) != 0 && !updatedPkgBetter) {
+            if (ps != null && ps.resourcePathString != null) {
+                resourcePath = ps.resourcePathString;
+                baseResourcePath = ps.resourcePathString;
+            } else {
+                // Should not happen at all. Just log an error.
+                Slog.e(TAG, "Resource path not set for pkg : " + pkg.packageName);
+            }
+        } else {
+            resourcePath = pkg.codePath;
+            baseResourcePath = pkg.baseCodePath;
+        }
+
+        // Set application objects path explicitly.
+        pkg.applicationInfo.volumeUuid = pkg.volumeUuid;
+        pkg.applicationInfo.setCodePath(pkg.codePath);
+        pkg.applicationInfo.setBaseCodePath(pkg.baseCodePath);
+        pkg.applicationInfo.setSplitCodePaths(pkg.splitCodePaths);
+        pkg.applicationInfo.setResourcePath(resourcePath);
+        pkg.applicationInfo.setBaseResourcePath(baseResourcePath);
+        pkg.applicationInfo.setSplitResourcePaths(pkg.splitCodePaths);
+```
+处理应用的代码路径和资源路径。
+
+继续scanPackageLI：
+
+```java
+        // Note that we invoke the following method only if we are about to unpack an application
+        PackageParser.Package scannedPkg = scanPackageLI(pkg, parseFlags, scanFlags
+                | SCAN_UPDATE_SIGNATURE, currentTime, user);
+```
+调用PackageParser的另一个scanPackageLI继续处理，后续会对其分析。
+
+继续scanPackageLI：
+
+```java
+        /*
+         * If the system app should be overridden by a previously installed
+         * data, hide the system app now and let the /data/app scan pick it up
+         * again.
+         */
+        if (shouldHideSystemApp) {
+            synchronized (mPackages) {
+                mSettings.disableSystemPackageLPw(pkg.packageName);
+            }
+        }
+
+        return scannedPkg;
+    }
+```
+如果扫描的系统app需要被隐藏，那么通过mSettings.disableSystemPackageLPw方法将其信息记录在mSettings的mDisabledSysPackages中。

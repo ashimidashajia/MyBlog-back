@@ -1,0 +1,238 @@
+---
+layout: post
+title: Android-6.0之PMS解析下篇
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-06-23 17:24:27
+---
+
+前面介绍了PMS启动的时候，扫描系统app目录时的代码，现在分析PMS启动时，如何扫描用户安装的app。
+
+<!--more-->
+
+继续PMS 构造方法
+
+```java
+//调用installd执行/system/etc/updatecmds下命令脚本
+if (DEBUG_UPGRADE) Log.v(TAG, "Running installd update commands");
+          mInstaller.moveFiles();          
+```
+接下来一段代码是处理有升级包的系统应用，也就是执行过OTA升级后，第一次启动时，需要关心的逻辑：
+
+```java
+// Prune any system packages that no longer exist.
+           final List<String> possiblyDeletedUpdatedSystemApps = new ArrayList<String>();
+           if (!mOnlyCore) {
+               Iterator<PackageSetting> psit = mSettings.mPackages.values().iterator();
+               while (psit.hasNext()) {
+                   PackageSetting ps = psit.next();
+
+                   /*
+                    * If this is not a system app, it can't be a
+                    * disable system app.
+                    */
+                   if ((ps.pkgFlags & ApplicationInfo.FLAG_SYSTEM) == 0) {
+                       continue;//忽略普通应用
+                   }
+
+                   /*
+                    * If the package is scanned, it's not erased.
+                    */
+                   final PackageParser.Package scannedPkg = mPackages.get(ps.name);
+                   if (scannedPkg != null) {
+                       /*
+                        * If the system app is both scanned and in the
+                        * disabled packages list, then it must have been
+                        * added via OTA. Remove it from the currently
+                        * scanned package so the previously user-installed
+                        * application can be scanned.
+                        */
+                        // packages.xml中<updated-package>修饰的package会被记录到mSettings中的disable列表中去
+                        // 这说明扫描的系统app是带有升级包的
+                       if (mSettings.isDisabledSystemPackageLPr(ps.name)) {
+                           logCriticalInfo(Log.WARN, "Expecting better updated system app for "
+                                   + ps.name + "; removing system app.  Last known codePath="
+                                   + ps.codePathString + ", installStatus=" + ps.installStatus
+                                   + ", versionCode=" + ps.versionCode + "; scanned versionCode="
+                                   + scannedPkg.mVersionCode);
+                           removePackageLI(ps, true);//将其从mPackages中移除
+                           mExpectingBetter.put(ps.name, ps.codePath);// 将其添加到mExpectingBetter，后续处理
+                       }
+
+                       continue;
+                   }
+
+                  // 运行到这里说明packages.xml中记录的app，这次没有扫描到。
+                   if (!mSettings.isDisabledSystemPackageLPr(ps.name)) {
+                     // 如果这个app在packages.xml也不属于<updated-package>
+                     // 意味着这个应用是残留在packages.xml中的，可能还会剩下沙箱数据，因此也要删掉
+                       psit.remove();
+                       logCriticalInfo(Log.WARN, "System package " + ps.name
+                               + " no longer exists; wiping its data");
+                       removeDataDirsLI(null, ps.name);
+                   } else {
+                     // 如果这个app在packages.xml属于<updated-package>
+                     // 将其加入possiblyDeletedUpdatedSystemApps
+                       final PackageSetting disabledPs = mSettings.getDisabledSystemPkgLPr(ps.name);
+                       if (disabledPs.codePath == null || !disabledPs.codePath.exists()) {
+                           possiblyDeletedUpdatedSystemApps.add(ps.name);
+                       }
+                   }
+               }
+           }
+
+```
+
+进行一些清理工作：
+```java
+          //扫描并删除未成功安装的apk包（针对第三方app）
+           //look for any incomplete package installations
+          ArrayList<PackageSetting> deletePkgsList = mSettings.getListOfIncompleteInstallPackagesLPr();
+          //clean up list
+          for(int i = 0; i < deletePkgsList.size(); i++) {
+              //clean up here
+              cleanupInstallFailedPackage(deletePkgsList.get(i));
+          }
+
+          // 删除临时文件
+          //delete tmp files
+          deleteTempPackageFiles();
+
+          // 把从mSettings中没有关联任何应用的SharedUserSetting对象删掉
+          mSettings.pruneSharedUsersLPw();
+
+```
+
+现在开始扫描用户安装的app了
+
+```java
+
+                EventLog.writeEvent(EventLogTags.BOOT_PROGRESS_PMS_DATA_SCAN_START,
+                        SystemClock.uptimeMillis());
+                scanDirLI(mAppInstallDir, 0, scanFlags | SCAN_REQUIRE_KNOWN, 0);
+
+                scanDirLI(mDrmAppPrivateInstallDir, PackageParser.PARSE_FORWARD_LOCK,
+                        scanFlags | SCAN_REQUIRE_KNOWN, 0);
+
+```
+同样是调用scanDirLI方法去扫描apk目录。这里要扫描的这两个文件是：
+
+```shell
+/data/app
+
+/data/app-priv
+```
+逻辑和上一篇分析的是一样的，只不过传入的扫描参数发生了变化： SCAN_REQUIRE_KNOWN。
+
+接下来是处理possiblyDeletedUpdatedSystemApps。
+
+它里面存储的是在packages.xml中被标记为<updated-package>,但是前面又没有扫描到的其apk文件的app。
+
+```java
+                /**
+                 * Remove disable package settings for any updated system
+                 * apps that were removed via an OTA. If they're not a
+                 * previously-updated app, remove them completely.
+                 * Otherwise, just revoke their system-level permissions.
+                 */
+                for (String deletedAppName : possiblyDeletedUpdatedSystemApps) {
+                    // 在扫描了用户app目录之后，再次尝试查找是否有这些app
+                    PackageParser.Package deletedPkg = mPackages.get(deletedAppName);
+                    mSettings.removeDisabledSystemPackageLPw(deletedAppName);
+
+                    String msg;
+                    // 依旧没有，那么就删除他们的数据目录
+                    if (deletedPkg == null) {
+                        msg = "Updated system package " + deletedAppName
+                                + " no longer exists; wiping its data";
+                        removeDataDirsLI(null, deletedAppName);
+                    } else {
+                      // 找到了，说明是在用户app目录中找到的，那么移除系统权限
+                        msg = "Updated system app + " + deletedAppName
+                                + " no longer present; removing system privileges for "
+                                + deletedAppName;
+
+                        deletedPkg.applicationInfo.flags &= ~ApplicationInfo.FLAG_SYSTEM;
+
+                        PackageSetting deletedPs = mSettings.mPackages.get(deletedAppName);
+                        deletedPs.pkgFlags &= ~ApplicationInfo.FLAG_SYSTEM;
+                    }
+                    logCriticalInfo(Log.WARN, msg);
+                }
+```
+
+
+存放到mExpectingBetter是那些带有升级包的系统应用。前面已经把他们从PMS的mPackages中移除并放到了mExpectingBetter中。
+
+
+
+```java
+                /**
+                 * Make sure all system apps that we expected to appear on
+                 * the userdata partition actually showed up. If they never
+                 * appeared, crawl back and revive the system version.
+                 */
+                for (int i = 0; i < mExpectingBetter.size(); i++) {
+                    final String packageName = mExpectingBetter.keyAt(i);
+                    if (!mPackages.containsKey(packageName)) {
+                        final File scanFile = mExpectingBetter.valueAt(i);
+
+                        logCriticalInfo(Log.WARN, "Expected better " + packageName
+                                + " but never showed up; reverting to system");
+
+                        //确保是在
+                        ///system/app-priv
+                        ///system/app
+                        ///vendor/app
+                        ///oem/app
+                        // 这四个目录中。
+                        final int reparseFlags;
+                        if (FileUtils.contains(privilegedAppDir, scanFile)) {
+                            reparseFlags = PackageParser.PARSE_IS_SYSTEM
+                                    | PackageParser.PARSE_IS_SYSTEM_DIR
+                                    | PackageParser.PARSE_IS_PRIVILEGED;
+                        } else if (FileUtils.contains(systemAppDir, scanFile)) {
+                            reparseFlags = PackageParser.PARSE_IS_SYSTEM
+                                    | PackageParser.PARSE_IS_SYSTEM_DIR;
+                        } else if (FileUtils.contains(vendorAppDir, scanFile)) {
+                            reparseFlags = PackageParser.PARSE_IS_SYSTEM
+                                    | PackageParser.PARSE_IS_SYSTEM_DIR;
+                        } else if (FileUtils.contains(oemAppDir, scanFile)) {
+                            reparseFlags = PackageParser.PARSE_IS_SYSTEM
+                                    | PackageParser.PARSE_IS_SYSTEM_DIR;
+                        } else {
+                            Slog.e(TAG, "Ignoring unexpected fallback path " + scanFile);
+                            continue;
+                        }
+
+                        // 会将其加入mSettings的mPackages中
+                        mSettings.enableSystemPackageLPw(packageName);
+
+                        /// 重新扫描这些文件
+                        try {
+                            scanPackageLI(scanFile, reparseFlags, scanFlags, 0, null);
+                        } catch (PackageManagerException e) {
+                            Slog.e(TAG, "Failed to parse original system package: "
+                                    + e.getMessage());
+                        }
+                    }
+                }
+            }
+              // 清除mExpectingBetter
+              mExpectingBetter.clear();
+
+
+
+```
+
+接下来的代码作用是更新所有应用的动态库路径，如果是OTA升级导致前后SDK版本不一致，还要进行权限重新检查，并且删除app oat cache目录。
+
+更新数据库版本，调用mSettings.writeLPr()将信息写入packages.xml中。
+
+最后创建mInstallerService对象：
+```java
+  mInstallerService = new PackageInstallerService(context, this);
+```
+
+PMS构造方法的执行过程就是先读取保存在packages.xml中记录的系统关机前记录所有安装的app信息，保存在mSettings中的mPackages中。
+然后扫描指定的若干目录中的app，并把信息记录在PMS的mPackages中。最后对两者进行对比，看是否能发现有升级的app，然后进行相关处理，最后在写入packages.xml中。

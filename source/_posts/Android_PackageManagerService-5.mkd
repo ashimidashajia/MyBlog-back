@@ -1,0 +1,392 @@
+---
+layout: post
+title: Android-6.0之PMS解析中篇2
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-06-21 19:21:00
+---
+
+本篇文章主要针对上篇文章中两个未分析的方法进行分析。
+
+<!--more-->
+
+### APK文件的解析
+
+
+上一篇中的scanPackageLI分析的开头
+
+```java
+private PackageParser.Package scanPackageLI(File scanFile, int parseFlags, int scanFlags,
+         long currentTime, UserHandle user) throws PackageManagerException {
+  ..........................
+     final PackageParser.Package pkg;
+     try {
+         pkg = pp.parsePackage(scanFile, parseFlags);
+     } catch (PackageParserException e) {
+         throw PackageManagerException.from(e);
+     }
+     ...........
+```
+
+
+
+我们并没有对PackageParser.parsePackage方法进行分析，现在着手分析它都做了什么。
+
+```java
+public Package parsePackage(File packageFile, int flags) throws PackageParserException {
+      if (packageFile.isDirectory()) {
+          return parseClusterPackage(packageFile, flags);
+      } else {
+          return parseMonolithicPackage(packageFile, flags);
+      }
+  }
+```
+parsePackage方法中要对传入File进行判断。
+
+Android 5.0 之后默认支持一个应用关联多个APK的形式，当某个app是这类情况的话，这些APK就会放在一个文件夹中，那么此时就会调用parseClusterPackage处理。
+
+当传入的file就是一个apk文件的话，调用parseMonolithicPackage来处理。
+
+
+#### 解析单个apk
+
+首先分析file为一个apk文件的情况，即parseMonolithicPackage：
+
+```java
+public Package parseMonolithicPackage(File apkFile, int flags) throws PackageParserException {
+        if (mOnlyCoreApps) {//PMS初始化时，该变量一般为false,只有在data区加解密等特殊情况下，才为true
+            final PackageLite lite = parseMonolithicPackageLite(apkFile, flags);
+            if (!lite.coreApp) {
+                throw new PackageParserException(INSTALL_PARSE_FAILED_MANIFEST_MALFORMED,
+                        "Not a coreApp: " + apkFile);
+            }
+        }
+
+        final AssetManager assets = new AssetManager();//AssetManager是资源管理框架
+        try {
+            final Package pkg = parseBaseApk(apkFile, assets, flags);// 在parseBaseApk的时候，会把assets传人
+            pkg.codePath = apkFile.getAbsolutePath();
+            return pkg;
+        } finally {
+            IoUtils.closeQuietly(assets);
+        }
+    }
+
+```
+先创建一个资源管理框架的对象AssetManager，在将其和apkfile等一起传入parseBaseApk方法：
+
+```java
+private Package parseBaseApk(File apkFile, AssetManager assets, int flags)
+           throws PackageParserException {
+       final String apkPath = apkFile.getAbsolutePath();// 返回apkFile绝对路径名字字符串
+
+       String volumeUuid = null;
+       if (apkPath.startsWith(MNT_EXPAND)) {
+           final int end = apkPath.indexOf('/', MNT_EXPAND.length());
+           volumeUuid = apkPath.substring(MNT_EXPAND.length(), end);
+       }
+
+       mParseError = PackageManager.INSTALL_SUCCEEDED;
+       mArchiveSourcePath = apkFile.getAbsolutePath();
+
+       if (DEBUG_JAR) Slog.d(TAG, "Scanning base APK: " + apkPath);
+
+       final int cookie = loadApkIntoAssetManager(assets, apkPath, flags);
+
+       Resources res = null;
+       XmlResourceParser parser = null;
+       try {
+           res = new Resources(assets, mMetrics, null);
+           /*
+            Resources类构造方法中调用其成员函数updateConfiguration,
+            首先是根据参数config和metrics来更新设备的当前配置信息，
+            例如，屏幕大小和密码、国家地区和语言、键盘配置情况等等，
+            接着再调用成员变量mAssets所指向的一个Java层的AssetManager对象的成员函数setConfiguration来将这些配置信息设置到与之关联的C++层的AssetManager对象中去。
+           */
+           assets.setConfiguration(0, 0, null, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                   Build.VERSION.RESOURCES_SDK_INT);
+          //创建AndroidMainfest.xml的xml解析器
+           parser = assets.openXmlResourceParser(cookie, ANDROID_MANIFEST_FILENAME);
+
+           final String[] outError = new String[1];
+           // 开始真正解析AndroidMainfest.xml
+           final Package pkg = parseBaseApk(res, parser, flags, outError);
+           if (pkg == null) {
+               throw new PackageParserException(mParseError,
+                       apkPath + " (at " + parser.getPositionDescription() + "): " + outError[0]);
+           }
+
+           pkg.volumeUuid = volumeUuid;
+           pkg.baseCodePath = apkPath;
+           pkg.mSignatures = null;
+
+           return pkg;
+
+       } catch (PackageParserException e) {
+           throw e;
+       } catch (Exception e) {
+           throw new PackageParserException(INSTALL_PARSE_FAILED_UNEXPECTED_EXCEPTION,
+                   "Failed to read manifest from " + apkPath, e);
+       } finally {
+           IoUtils.closeQuietly(parser);
+       }
+   }
+```
+该方法说白了，就是对AndroidMainfest.xml文件进行解析。真正解析这个xml的是其内部调用的parseBaseApk方法。该方法先调用以pkgName为参数的构造方法创建一个PackageParser.Package对象。
+
+
+
+```java
+public Package(String packageName) {
+           this.packageName = packageName;
+           applicationInfo.packageName = packageName;
+           applicationInfo.uid = -1;
+       }
+
+```
+接下来就是将解析到的AndroidMainfest.xml相关信息，赋值到Package的相关属性字段中去。如xml中声明的四大组件了，该app的版本号了等等。
+
+```java
+public final static class Package {
+
+        public String packageName;
+
+        .........................
+        public String codePath;
+
+        /** Path of base APK */
+        public String baseCodePath;
+        /** Paths of any split APKs, ordered by parsed splitName */
+        public String[] splitCodePaths;
+
+        ................................
+        // For now we only support one application per package.
+       public final ApplicationInfo applicationInfo = new ApplicationInfo();
+
+       public final ArrayList<Permission> permissions = new ArrayList<Permission>(0);
+       public final ArrayList<PermissionGroup> permissionGroups = new ArrayList<PermissionGroup>(0);
+       public final ArrayList<Activity> activities = new ArrayList<Activity>(0);
+       public final ArrayList<Activity> receivers = new ArrayList<Activity>(0);
+       public final ArrayList<Provider> providers = new ArrayList<Provider>(0);
+       public final ArrayList<Service> services = new ArrayList<Service>(0);
+       public final ArrayList<Instrumentation> instrumentation = new ArrayList<Instrumentation>(0);
+        .....................................
+        // The version code declared for this package.
+       public int mVersionCode;
+
+       // The version name declared for this package.
+       public String mVersionName;
+
+       // The shared user id that this package wants to use.
+       public String mSharedUserId;
+       .................................
+
+```
+实际上解析apk的过程，就是解析xml，然后填充PackageParser.Package对象的过程。
+
+时序图：
+
+![][4]
+
+#### 解析一个app有多个apk的情况
+
+Split APK是Google为解决65536上限，以及APK安装包越来越大等问题，在Android L中引入的机制。
+
+Split APK可以将一个庞大的APK，按屏幕密度，ABI等形式拆分成多个独立的APK，在应用程序更新时，不必下载整个APK，只需单独下载某个模块即可安装更新。
+
+Split APK将原来一个APK中多个模块共享同一份资源的模型分离成多个APK使用各自的资源，并且可以继承Base APK中的资源，多个APK有相同的data，cache目录，多个dex文件，相同的进程，在Settings.apk中只显示一个APK，并且使用相同的包名。
+
+![][1]
+
+可参考[该文章][2]，了解如何使用该机制。
+
+当是这种情况时，会调用parseClusterPackage
+
+```java
+private Package parseClusterPackage(File packageDir, int flags) throws PackageParserException {
+      // 获取应用目录的PackageLite对象，该对象中分开保存了该目录下的核心应用和非核心应用的名称。
+       final PackageLite lite = parseClusterPackageLite(packageDir, 0);
+
+       if (mOnlyCoreApps && !lite.coreApp) {
+           throw new PackageParserException(INSTALL_PARSE_FAILED_MANIFEST_MALFORMED,
+                   "Not a coreApp: " + packageDir);
+       }
+
+       final AssetManager assets = new AssetManager();
+       try {
+           // Load the base and all splits into the AssetManager
+           // so that resources can be overriden when parsing the manifests.
+           // 先装载核心应用的资源
+           loadApkIntoAssetManager(assets, lite.baseCodePath, flags);
+
+          // 在装载其他非核心应用的资源
+           if (!ArrayUtils.isEmpty(lite.splitCodePaths)) {
+               for (String path : lite.splitCodePaths) {
+                   loadApkIntoAssetManager(assets, path, flags);
+               }
+           }
+
+           final File baseApk = new File(lite.baseCodePath);
+           // 对核心应用调用parseBaseApk进行解析
+           final Package pkg = parseBaseApk(baseApk, assets, flags);
+           if (pkg == null) {
+               throw new PackageParserException(INSTALL_PARSE_FAILED_NOT_APK,
+                       "Failed to parse base APK: " + baseApk);
+           }
+
+           if (!ArrayUtils.isEmpty(lite.splitNames)) {
+               final int num = lite.splitNames.length;
+               pkg.splitNames = lite.splitNames;
+               pkg.splitCodePaths = lite.splitCodePaths;
+               pkg.splitRevisionCodes = lite.splitRevisionCodes;
+               pkg.splitFlags = new int[num];
+               pkg.splitPrivateFlags = new int[num];
+
+               //对非核心应用调用parseSplitApk解析
+               for (int i = 0; i < num; i++) {
+                   parseSplitApk(pkg, i, assets, flags);
+               }
+           }
+
+           pkg.codePath = packageDir.getAbsolutePath();
+           return pkg;
+       } finally {
+           IoUtils.closeQuietly(assets);
+       }
+   }
+```
+
+parseClusterPackage首先调用parseClusterPackageLite对目录下的apk文件进行初步分析，主要是区别除核心应用和非核心应用。核心应用只有一个，非核心应用可以没有，也可以有多个。
+
+对核心应用调用parseBaseApk解析，对非核心应用调用parseSplitApk，解析到的结果会保存在同一个PackageParser.Package对象中。
+
+
+时序图：
+
+![][3]
+
+### scanPackageDirtyLI方法
+
+前面分析的scanPackageLI方法的最后还会调用同但参数不同的scanPackageLI方法。
+
+```java
+private PackageParser.Package scanPackageLI(PackageParser.Package pkg, int parseFlags,
+        int scanFlags, long currentTime, UserHandle user) throws PackageManagerException {
+    boolean success = false;
+    try {
+        final PackageParser.Package res = scanPackageDirtyLI(pkg, parseFlags, scanFlags,
+                currentTime, user);
+        success = true;
+        return res;
+    } finally {
+        if (!success && (scanFlags & SCAN_DELETE_DATA_ON_FAILURES) != 0) {
+            removeDataDirsLI(pkg.volumeUuid, pkg.packageName);
+        }
+    }
+}
+```
+
+该方法内部调用 scanPackageDirtyLI来完成相应的工作.scanPackageLI方法也能被单独调用使用，我们这里只关心当它被前一个scanPackageLI方法调用时的逻辑。
+
+Android系统中有这样的一个场景，当发出一个intent的时候，如果对话框中存在多个响应的activity，Android就会弹出一个对话框，让用户进行选择。典型的例子，就是设备中安装了多个可以打开的word文件的软件的时候，当打开word时，如过没有设置默认使用的软件，那么就会弹出一个对话框，让用户选择使用哪个app来打开word文件。这个对话框叫做ResolverActivity.因此该对话框，是存在与系统内部的对象，它保存在PMS的mResolveActivity变量。
+
+ResolverActivity的代码位于framework-res.apk中，因此scanPackageLi扫描发现文件的包名是“Android”的时候，会从文件中提取ResolverActivity的信息，并创建mResolveActivity对象。如果系统中通过定义字符串"config_customResolverActivity"指定了替代的ResolverActivity，那么则会在找到了替代的包名后，在创建mResolveActivity对象，不在使用framework-res.apk中的ResolverActivity.
+
+
+```java
+ivate PackageParser.Package scanPackageDirtyLI(PackageParser.Package pkg, int parseFlags,
+            int scanFlags, long currentTime, UserHandle user) throws PackageManagerException {
+
+              ...................
+              if (mCustomResolverComponentName != null &&
+                              mCustomResolverComponentName.getPackageName().equals(pkg.packageName)) {
+
+                          // 该方法中会将 mResolverReplaced 设置为true
+                          setUpCustomResolverActivity(pkg);
+                      }
+              ...................
+              if (pkg.packageName.equals("android")) {
+            synchronized (mPackages) {
+                if (mAndroidApplication != null) {
+                    Slog.w(TAG, "*************************************************");
+                    Slog.w(TAG, "Core android package being redefined.  Skipping.");
+                    Slog.w(TAG, " file=" + scanFile);
+                    Slog.w(TAG, "*************************************************");
+                    throw new PackageManagerException(INSTALL_FAILED_DUPLICATE_PACKAGE,
+                            "Core android package being redefined.  Skipping.");
+                }
+
+                // Set up information for our fall-back user intent resolution activity.
+                mPlatformPackage = pkg;
+                pkg.mVersionCode = mSdkVersion;
+                mAndroidApplication = pkg.applicationInfo;
+
+
+                if (!mResolverReplaced) {
+                    mResolveActivity.applicationInfo = mAndroidApplication;
+                    mResolveActivity.name = ResolverActivity.class.getName();
+                    mResolveActivity.packageName = mAndroidApplication.packageName;
+                    mResolveActivity.processName = "system:ui";
+                    mResolveActivity.launchMode = ActivityInfo.LAUNCH_MULTIPLE;
+                    mResolveActivity.documentLaunchMode = ActivityInfo.DOCUMENT_LAUNCH_NEVER;
+                    mResolveActivity.flags = ActivityInfo.FLAG_EXCLUDE_FROM_RECENTS;
+                    mResolveActivity.theme = R.style.Theme_Holo_Dialog_Alert;
+                    mResolveActivity.exported = true;
+                    mResolveActivity.enabled = true;
+                    mResolveInfo.activityInfo = mResolveActivity;
+                    mResolveInfo.priority = 0;
+                    mResolveInfo.preferredOrder = 0;
+                    mResolveInfo.match = 0;
+                    mResolveComponentName = new ComponentName(
+                            mAndroidApplication.packageName, mResolveActivity.name);
+                }
+            }
+        }
+        .....................
+}
+```
+
+可能在其他目录中已经扫描并安装过一个同名的app了，所以抛出异常。
+```java
+if (mPackages.containsKey(pkg.packageName)
+             || mSharedLibraries.containsKey(pkg.packageName)) {
+         throw new PackageManagerException(INSTALL_FAILED_DUPLICATE_PACKAGE,
+                 "Application package " + pkg.packageName
+                 + " already installed.  Skipping duplicate.");
+     }
+```
+
+接下来的代码不贴了太多了，间要说下余下代码都做了什么事情。
+
+如果扫描应用中有<original-package>标签，并且有升级包则将包的悉尼西加入到mSeetings的mRenamedPackages变量中，这些信息也会保存在packages.xml中<rename-package>标签下。
+
+
+再次校验签名，并检查共享UID的app签名是否一致，不一致要报错。
+
+利用fixProcessName（）修改app将来运行时的进程名称，将来可以通过/proc/self/cmdline读取。
+
+如果应用的沙箱目录已经存在，那么检查是否有错误，如uid是否一致等等，发现错误的话，删掉数据目录，重新建立。
+
+安装应用中的动态，这里要注意系统app和第三方app的区别。系统app的so库，一般会放在/system/lib下。另外系统app的目录中会有一个连接文件指向/system/lib下的so库，这就导致系统app，无法通过分析目录文件确定其so库使用的abi.而第三方app，可以通过armeabi,armeabi-v7a等目录名字确定其abi。对于第三方app，其so库会放在
+
+```shell
+/data/app/包名/lib/(arm/arm64/x86)/
+```
+
+然后在沙箱目录中创建一个lib连接文件，指向上述目录。
+
+如果检测到应用所依赖的动态库文件发生了改变，咋调用performDexOpt重新执行。
+
+最后就是把app中Activity,Service,Provider,receiver,permission,Permission Group等信息全部提取出来，放到PMS相关成员变量中。
+
+
+
+
+
+
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/PMS-2.png
+[2]: http://blog.csdn.net/ximsfei/article/details/50884862
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/PMS-3.png
+[4]: http://7xj6ce.com1.z0.glb.clouddn.com/PMS-4.png
