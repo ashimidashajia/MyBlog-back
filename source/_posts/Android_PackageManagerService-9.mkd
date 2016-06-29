@@ -1,0 +1,1133 @@
+---
+layout: post
+title: Android-6.0之PMS安装APK下篇
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-06-27 18:24:26
+---
+
+安装一个apk分为：检查权限，复制文件，装在应用。前面分析了前两步，现在开始分析app的装载。
+
+<!--more-->
+
+这一步中主要完成将dex转换为ART虚拟机的oat格式的执行文件，并为应用创建数据沙箱目录，最后把应用的信息装载进PMS的数据结构中去。
+
+在前面的处理MCS_BOUND时调用的HandlerParams的startCopy方法中
+
+```java
+final boolean startCopy() {
+           boolean res;
+           try {
+    ...........................
+               if (++mRetries > MAX_RETRIES) {
+        ....................................................
+                   return false;
+               } else {
+                   handleStartCopy();
+                   res = true;
+               }
+           } catch (RemoteException e) {
+..............................
+           }
+           handleReturnCode();
+           return res;
+       }
+```
+可以知道当复制完文件之后，会调用InstallParams的handleReturnCode方法：
+
+```java
+void handleReturnCode() {
+           // If mArgs is null, then MCS couldn't be reached. When it
+           // reconnects, it will try again to install. At that point, this
+           // will succeed.
+           if (mArgs != null) {
+               processPendingInstall(mArgs, mRet);
+           }
+       }
+
+```
+代码如下：
+
+```java
+private void processPendingInstall(final InstallArgs args, final int currentStatus) {
+       // Queue up an async operation since the package installation may take a little while.
+       mHandler.post(new Runnable() {
+           public void run() {
+               mHandler.removeCallbacks(this);
+                // Result object to be returned
+               PackageInstalledInfo res = new PackageInstalledInfo();
+               res.returnCode = currentStatus;
+               res.uid = -1;
+               res.pkg = null;
+               res.removedInfo = new PackageRemovedInfo();
+               if (res.returnCode == PackageManager.INSTALL_SUCCEEDED) {
+                    //一般情况下，什么都不会做的
+                   args.doPreInstall(res.returnCode);
+                   synchronized (mInstallLock) {
+                       installPackageLI(args, res);
+                   }
+                   args.doPostInstall(res.returnCode, res.uid);
+               }
+            .....................................
+            /* 省略关于云备份的代码*/
+            .....................................
+               if (!doRestore) {
+                   // No restore possible, or the Backup Manager was mysteriously not
+                   // available -- just fire the post-install work request directly.
+                   if (DEBUG_INSTALL) Log.v(TAG, "No restore - queue post-install for " + token);
+                   Message msg = mHandler.obtainMessage(POST_INSTALL, token, 0);
+                   mHandler.sendMessage(msg);
+               }
+           }
+       });
+   }
+```
+processPendingInstall()方法中post了一个消息，这样安装过程将以异步的方式继续执行。在post消息中，首先是调用installPackageLI()来装载应用，接下来的一大段代码是在执行设备备份操作，备份是通过BackupManagerService来完成的，这里就不分析了。备份完成之后，通过发送POST_INSTALL消息继续处理。
+
+doPreInstall()一般情况下是什么都不会做的，接着看installPackageLI()方法，代码很长，所以依旧是以分段解析。
+
+```java
+private void installPackageLI(InstallArgs args, PackageInstalledInfo res) {
+
+        //得到installFlags，里面记录了app需要安装到哪里
+        final int installFlags = args.installFlags;
+        // 安装程序的包名
+        final String installerPackageName = args.installerPackageName;
+        // 与sd卡安装有关，一般为null
+        final String volumeUuid = args.volumeUuid;
+        // 前面已经把apk拷贝到了临时阶段性文件夹/data/app/vmdl<安装回话id>.tmp/这个目录了
+        final File tmpPackageFile = new File(args.getCodePath());
+        // 没有设定INSTALL_FORWARD_LOCK
+        final boolean forwardLocked = ((installFlags & PackageManager.INSTALL_FORWARD_LOCK) != 0);
+        // 是否安装到外部存储
+        final boolean onExternal = (((installFlags & PackageManager.INSTALL_EXTERNAL) != 0)
+                || (args.volumeUuid != null));
+        // 初始化替换flag为假
+        boolean replace = false;
+        // 设置浏览参数
+        int scanFlags = SCAN_NEW_INSTALL | SCAN_UPDATE_SIGNATURE;
+        // 我们不是移动app，所以为null，不走这块代码
+        if (args.move != null) {
+            // moving a complete application; perfom an initial scan on the new install location
+            scanFlags |= SCAN_INITIAL;
+        }
+        // 初始化返回码
+        // Result object to be returned
+        res.returnCode = PackageManager.INSTALL_SUCCEEDED;
+```
+这里就是做了一些初始化值的工作。详情看上述注释。
+
+```java
+if (DEBUG_INSTALL) Slog.d(TAG, "installPackageLI: path=" + tmpPackageFile);
+      // Retrieve PackageSettings and parse package
+
+      // 设置解析apk的flags
+      final int parseFlags = mDefParseFlags | PackageParser.PARSE_CHATTY
+              | (forwardLocked ? PackageParser.PARSE_FORWARD_LOCK : 0)
+              | (onExternal ? PackageParser.PARSE_EXTERNAL_STORAGE : 0);
+
+      // 创建一个解析器
+      PackageParser pp = new PackageParser();
+      pp.setSeparateProcesses(mSeparateProcesses);
+      // 获得屏幕参数
+      pp.setDisplayMetrics(mMetrics);
+
+      final PackageParser.Package pkg;
+      try {
+          // 开始解析apk,要注意此时传入tmpPackageFile为一个文件夹
+          pkg = pp.parsePackage(tmpPackageFile, parseFlags);
+      } catch (PackageParserException e) {
+          res.setError("Failed parse during installPackageLI", e);
+          return;
+      }
+
+      // Mark that we have an install time CPU ABI override.
+      pkg.cpuAbiOverride = args.abiOverride;
+
+      String pkgName = res.name = pkg.packageName;
+      if ((pkg.applicationInfo.flags&ApplicationInfo.FLAG_TEST_ONLY) != 0) {
+          if ((installFlags & PackageManager.INSTALL_ALLOW_TEST) == 0) {
+              res.setError(INSTALL_FAILED_TEST_ONLY, "installPackageLI");
+              return;
+          }
+      }
+
+```
+
+这里主要是解析APK，也就是解析AndroidMainifest.xml文件，将结果记录在PackageParser.Package中。前面已经详细介绍如何解析一个APK了，所以这里不在赘述了。
+
+
+接下来是搜集apk的签名信息，代码如下：
+
+```java
+try {
+            pp.collectCertificates(pkg, parseFlags);
+            pp.collectManifestDigest(pkg);
+        } catch (PackageParserException e) {
+            res.setError("Failed collect during installPackageLI", e);
+            return;
+        }
+```
+
+如果安装程序此前传入了一个清单文件，那么将解析到的清单文件与传入的进行对比。安装器的确传入了一个清单，PackageInstallerActivity中也解析了apk,那时记录了这个清单，并一并传入到这里了。这里又做了一步判断，判断两者是同一个apk.
+
+```java
+/* If the installer passed in a manifest digest, compare it now. */
+        if (args.manifestDigest != null) {
+            if (DEBUG_INSTALL) {
+                final String parsedManifest = pkg.manifestDigest == null ? "null"
+                        : pkg.manifestDigest.toString();
+                Slog.d(TAG, "Comparing manifests: " + args.manifestDigest.toString() + " vs. "
+                        + parsedManifest);
+            }
+
+            if (!args.manifestDigest.equals(pkg.manifestDigest)) {
+                res.setError(INSTALL_FAILED_PACKAGE_CHANGED, "Manifest digest changed");
+                return;
+            }
+        } else if (DEBUG_INSTALL) {
+            final String parsedManifest = pkg.manifestDigest == null
+                    ? "null" : pkg.manifestDigest.toString();
+            Slog.d(TAG, "manifestDigest was not present, but parser got: " + parsedManifest);
+        }
+```
+
+继续分析installPackageLI：
+```java
+// Check if installing already existing package
+            // 如果安装已经存在的应用的时候，PackageInstaller应用安装器会在会在installFlags中设置INSTALL_REPLACE_EXISTING
+           if ((installFlags & PackageManager.INSTALL_REPLACE_EXISTING) != 0) {
+
+                // 看看要替换的apk的包名是否存在原始包名
+                // 当app升级导致前后包名不一致的时候，需要记录仍然是原始包名，
+                // 所以这里要先检查要覆盖的app是否是这样的情况，是的话设置包名为旧的包名
+               String oldName = mSettings.mRenamedPackages.get(pkgName);
+               if (pkg.mOriginalPackages != null
+                       && pkg.mOriginalPackages.contains(oldName)
+                       && mPackages.containsKey(oldName)) {
+                   // This package is derived from an original package,
+                   // and this device has been updating from that original
+                   // name.  We must continue using the original name, so
+                   // rename the new package here.
+                   pkg.setPackageName(oldName);
+                   pkgName = pkg.packageName;
+                   replace = true;
+                   if (DEBUG_INSTALL) Slog.d(TAG, "Replacing existing renamed package: oldName="
+                           + oldName + " pkgName=" + pkgName);
+               } else if (mPackages.containsKey(pkgName)) {
+                   // This package, under its official name, already exists
+                   // on the device; we should replace it.
+                   replace = true;
+                   if (DEBUG_INSTALL) Slog.d(TAG, "Replace existing pacakge: " + pkgName);
+               }
+
+               // Prevent apps opting out from runtime permissions
+               // 检查新的app编译的时候选择的target目标版本低于6.0，而原来的app编译的时候target选择的是6.0，
+               // 当一个app按照6.0来编译的话，需要按照6.0的规则来解析app的权限。
+               if (replace) {
+                   PackageParser.Package oldPackage = mPackages.get(pkgName);
+                   final int oldTargetSdk = oldPackage.applicationInfo.targetSdkVersion;
+                   final int newTargetSdk = pkg.applicationInfo.targetSdkVersion;
+                   if (oldTargetSdk > Build.VERSION_CODES.LOLLIPOP_MR1
+                           && newTargetSdk <= Build.VERSION_CODES.LOLLIPOP_MR1) {
+                       res.setError(PackageManager.INSTALL_FAILED_PERMISSION_MODEL_DOWNGRADE,
+                               "Package " + pkg.packageName + " new target SDK " + newTargetSdk
+                                       + " doesn't support runtime permissions but the old"
+                                       + " target SDK " + oldTargetSdk + " does.");
+                       return;
+                   }
+               }
+           }
+
+           // 如果ps不为null,同样说明，已经存在一个同包名的程序被安装，
+           // 也就是还是处理覆盖安装的情况
+           // 这里主要是验证包名的签名，不一致的话，是不能覆盖安装的，另外版本号也不能比安装的低，否则也不能安装
+           PackageSetting ps = mSettings.mPackages.get(pkgName);
+          if (ps != null) {
+              if (DEBUG_INSTALL) Slog.d(TAG, "Existing package: " + ps);
+
+              // Quick sanity check that we're signed correctly if updating;
+              // we'll check this again later when scanning, but we want to
+              // bail early here before tripping over redefined permissions.
+              if (shouldCheckUpgradeKeySetLP(ps, scanFlags)) {
+                  if (!checkUpgradeKeySetLP(ps, pkg)) {
+                      res.setError(INSTALL_FAILED_UPDATE_INCOMPATIBLE, "Package "
+                              + pkg.packageName + " upgrade keys do not match the "
+                              + "previously installed version");
+                      return;
+                  }
+              } else {
+                  try {
+                      verifySignaturesLP(ps, pkg);
+                  } catch (PackageManagerException e) {
+                      res.setError(e.error, e.getMessage());
+                      return;
+                  }
+              }
+
+              oldCodePath = mSettings.mPackages.get(pkgName).codePathString;
+              if (ps.pkg != null && ps.pkg.applicationInfo != null) {
+                  systemApp = (ps.pkg.applicationInfo.flags &
+                          ApplicationInfo.FLAG_SYSTEM) != 0;
+              }
+              res.origUsers = ps.queryInstalledUsers(sUserManager.getUserIds(), true);
+          }
+
+```
+这里主要是对覆盖安装的时候，设置一些变量。
+
+
+继续分析，接下来是对apk定义的权限进行初步检查：
+
+```java
+// Check whether the newly-scanned package wants to define an already-defined perm
+            int N = pkg.permissions.size();
+            for (int i = N-1; i >= 0; i--) {
+                PackageParser.Permission perm = pkg.permissions.get(i);
+                BasePermission bp = mSettings.mPermissions.get(perm.info.name);
+                if (bp != null) {
+                    // If the defining package is signed with our cert, it's okay.  This
+                    // also includes the "updating the same package" case, of course.
+                    // "updating same package" could also involve key-rotation.
+                    final boolean sigsOk;
+                    if (bp.sourcePackage.equals(pkg.packageName)
+                            && (bp.packageSetting instanceof PackageSetting)
+                            && (shouldCheckUpgradeKeySetLP((PackageSetting) bp.packageSetting,
+                                    scanFlags))) {
+                        sigsOk = checkUpgradeKeySetLP((PackageSetting) bp.packageSetting, pkg);
+                    } else {
+                        sigsOk = compareSignatures(bp.packageSetting.signatures.mSignatures,
+                                pkg.mSignatures) == PackageManager.SIGNATURE_MATCH;
+                    }
+                    if (!sigsOk) {
+                        // If the owning package is the system itself, we log but allow
+                        // install to proceed; we fail the install on all other permission
+                        // redefinitions.
+                        if (!bp.sourcePackage.equals("android")) {
+                            res.setError(INSTALL_FAILED_DUPLICATE_PERMISSION, "Package "
+                                    + pkg.packageName + " attempting to redeclare permission "
+                                    + perm.info.name + " already owned by " + bp.sourcePackage);
+                            res.origPermission = perm.info.name;
+                            res.origPackage = bp.sourcePackage;
+                            return;
+                        } else {
+                            Slog.w(TAG, "Package " + pkg.packageName
+                                    + " attempting to redeclare system permission "
+                                    + perm.info.name + "; ignoring new declaration");
+                            pkg.permissions.remove(i);
+                        }
+                    }
+                }
+            }
+```
+这段代码作用是检查apk中定义的所有的权限是否已经被其他应用定义了，如果重定义的是系统应用定义的权限，那么忽略本app定义的这个权限。如果重定义的是非系统应用的权限，那么本次安装就以失败返回。
+
+
+继续分析，当一个app是系统应用，但又希望安装在外部存储，那么就报错。
+```java
+if (systemApp && onExternal) {
+            // Disable updates to system apps on sdcard
+            res.setError(INSTALL_FAILED_INVALID_INSTALL_LOCATION,
+                    "Cannot install updates to system apps on sdcard");
+            return;
+        }
+```
+意味着，系统app是不能安装到外部存储的。
+
+
+继续分析：
+
+```java
+// 我们不是在移动app，所以不走这个分支
+if (args.move != null) {
+    // We did an in-place move, so dex is ready to roll
+    scanFlags |= SCAN_NO_DEX;
+    scanFlags |= SCAN_MOVE;
+
+    synchronized (mPackages) {
+        final PackageSetting ps = mSettings.mPackages.get(pkgName);
+        if (ps == null) {
+            res.setError(INSTALL_FAILED_INTERNAL_ERROR,
+                    "Missing settings for moved package " + pkgName);
+        }
+
+        // We moved the entire application as-is, so bring over the
+        // previously derived ABI information.
+        pkg.applicationInfo.primaryCpuAbi = ps.primaryCpuAbiString;
+        pkg.applicationInfo.secondaryCpuAbi = ps.secondaryCpuAbiString;
+    }
+
+} else if (!forwardLocked && !pkg.applicationInfo.isExternalAsec()) {
+  //走这个分支
+    // Enable SCAN_NO_DEX flag to skip dexopt at a later stage
+    // 设置SCAN_NO_DEX，这样在这个阶段就不会执行dexopt
+    scanFlags |= SCAN_NO_DEX;
+
+    try {
+
+        derivePackageAbi(pkg, new File(pkg.codePath), args.abiOverride,
+                true /* extract libs */);
+    } catch (PackageManagerException pme) {
+        Slog.e(TAG, "Error deriving application ABI", pme);
+        res.setError(INSTALL_FAILED_INTERNAL_ERROR, "Error deriving application ABI");
+        return;
+    }
+
+    // Run dexopt before old package gets removed, to minimize time when app is unavailable
+    int result = mPackageDexOptimizer
+            .performDexOpt(pkg, null /* instruction sets */, false /* forceDex */,
+                    false /* defer */, false /* inclDependencies */);
+    if (result == PackageDexOptimizer.DEX_OPT_FAILED) {
+        res.setError(INSTALL_FAILED_DEXOPT, "Dexopt failed for " + pkg.codePath);
+        return;
+    }
+}
+
+```
+derivePackageAbi()方法也很重要，主要完成了apk的so库路径设置，以及主次abi的值。
+
+```java
+
+    /**
+     * Derive the ABI of a non-system package located at {@code scanFile}. This information
+     * is derived purely on the basis of the contents of {@code scanFile} and
+     * {@code cpuAbiOverride}.
+     *
+     * If {@code extractLibs} is true, native libraries are extracted from the app if required.
+     */
+    public void derivePackageAbi(PackageParser.Package pkg, File scanFile,
+                                 String cpuAbiOverride, boolean extractLibs)
+            throws PackageManagerException {
+        //这里是第一次调用，主要确定pkg中的applicationInfo中的下面三个字段
+        // nativeLibraryRootDir /data/app/vmdl<回话id>.tmp/lib
+        // nativeLibraryRootRequiresIsa 为true,用户安装的第三方app，该字段就为true,说明需要在lib/加前缀，如arm,arm64等
+        // nativeLibraryDir :/data/app/vmdl<回话id>.tmp/lib/<前缀>
+
+        setNativeLibraryPaths(pkg);
+
+        // We would never need to extract libs for forward-locked and external packages,
+        // since the container service will do it for us. We shouldn't attempt to
+        // extract libs from system app when it was not updated.
+        if (pkg.isForwardLocked() || isExternal(pkg) ||
+            (isSystemApp(pkg) && !pkg.isUpdatedSystemApp()) ) {
+            extractLibs = false;
+        }
+
+        final String nativeLibraryRootStr = pkg.applicationInfo.nativeLibraryRootDir;
+        // 对于用户安装的第三方app，该标志为true，预示着要在nativeLibraryRootStr路径后面加上“arm”或者”arm64"或者“x86”
+        // 这类的前缀，具体原因请参考setNativeLibraryPaths()
+        final boolean useIsaSpecificSubdirs = pkg.applicationInfo.nativeLibraryRootRequiresIsa;
+
+        NativeLibraryHelper.Handle handle = null;
+        try {
+            handle = NativeLibraryHelper.Handle.create(scanFile);
+            // TODO(multiArch): This can be null for apps that didn't go through the
+            // usual installation process. We can calculate it again, like we
+            // do during install time.
+            //
+            // TODO(multiArch): Why do we need to rescan ASEC apps again ? It seems totally
+            // unnecessary.
+            final File nativeLibraryRoot = new File(nativeLibraryRootStr);
+
+            // Null out the abis so that they can be recalculated.
+            pkg.applicationInfo.primaryCpuAbi = null;
+            pkg.applicationInfo.secondaryCpuAbi = null;
+            if (isMultiArch(pkg.applicationInfo)) {
+                // Warn if we've set an abiOverride for multi-lib packages..
+                // By definition, we need to copy both 32 and 64 bit libraries for
+                // such packages.
+                // cpuAbiOverride对于有多个so库文件夹的apk是无效的
+                if (pkg.cpuAbiOverride != null
+                        && !NativeLibraryHelper.CLEAR_ABI_OVERRIDE.equals(pkg.cpuAbiOverride)) {
+                    Slog.w(TAG, "Ignoring abiOverride for multi arch application.");
+                }
+
+                int abi32 = PackageManager.NO_NATIVE_LIBRARIES;
+                int abi64 = PackageManager.NO_NATIVE_LIBRARIES;
+                if (Build.SUPPORTED_32_BIT_ABIS.length > 0) {
+                    if (extractLibs) {
+                      // 这里再次拷贝，如果apk中的lib中的so库时间戳没有发生变化的时候，是不会在拷贝的，因为前面已经拷贝过了
+                      // 只有当so库发生变化的时候，才会再次拷贝
+                        abi32 = NativeLibraryHelper.copyNativeBinariesForSupportedAbi(handle,
+                                nativeLibraryRoot, Build.SUPPORTED_32_BIT_ABIS,
+                                useIsaSpecificSubdirs);
+                    } else {
+                        abi32 = NativeLibraryHelper.findSupportedAbi(handle, Build.SUPPORTED_32_BIT_ABIS);
+                    }
+                }
+
+                maybeThrowExceptionForMultiArchCopy(
+                        "Error unpackaging 32 bit native libs for multiarch app.", abi32);
+
+                if (Build.SUPPORTED_64_BIT_ABIS.length > 0) {
+                    if (extractLibs) {
+                      // 这里再次拷贝，如果apk中的lib中的so库时间戳没有发生变化的时候，是不会在拷贝的，因为前面已经拷贝过了
+                      // 只有当so库发生变化的时候，才会再次拷贝
+                        abi64 = NativeLibraryHelper.copyNativeBinariesForSupportedAbi(handle,
+                                nativeLibraryRoot, Build.SUPPORTED_64_BIT_ABIS,
+                                useIsaSpecificSubdirs);
+                    } else {
+                        abi64 = NativeLibraryHelper.findSupportedAbi(handle, Build.SUPPORTED_64_BIT_ABIS);
+                    }
+                }
+
+                maybeThrowExceptionForMultiArchCopy(
+                        "Error unpackaging 64 bit native libs for multiarch app.", abi64);
+
+                if (abi64 >= 0) {
+                    // 如果so库支持64位的abi,而且系统也是64位的话Message1
+                    // 就把主abi设置为ro.product.cpu.abilist64列表中abi64索引的值
+                    pkg.applicationInfo.primaryCpuAbi = Build.SUPPORTED_64_BIT_ABIS[abi64];
+                }
+
+                if (abi32 >= 0) {
+                    final String abi = Build.SUPPORTED_32_BIT_ABIS[abi32];
+                    if (abi64 >= 0) {
+                        // 当系统是64位。且apk中即包含了64位的库，又包含了32位的库，
+                        // 那么就把次abi设置为ro.product.cpu.abilist32列表中abi32索引的值
+                        pkg.applicationInfo.secondaryCpuAbi = abi;
+                    } else {
+                        // 如果app只有32位的库，那么就把
+                        // 主abi设置为ro.product.cpu.abilist32列表中abi32索引的值
+                        pkg.applicationInfo.primaryCpuAbi = abi;
+                    }
+                }
+            } else {
+               //对于apk中的lib中只有一个so库文件夹，走这个分支
+               // cpuAbiOverride传入的为null
+               // 所以abiList为ro.product.cpu.abilist列表中的值
+                String[] abiList = (cpuAbiOverride != null) ?
+                        new String[] { cpuAbiOverride } : Build.SUPPORTED_ABIS;
+
+                // Enable gross and lame hacks for apps that are built with old
+                // SDK tools. We must scan their APKs for renderscript bitcode and
+                // not launch them if it's present. Don't bother checking on devices
+                // that don't have 64 bit support.
+                boolean needsRenderScriptOverride = false;
+                if (Build.SUPPORTED_64_BIT_ABIS.length > 0 && cpuAbiOverride == null &&
+                        NativeLibraryHelper.hasRenderscriptBitcode(handle)) {
+                    abiList = Build.SUPPORTED_32_BIT_ABIS;
+                    needsRenderScriptOverride = true;
+                }
+
+                final int copyRet;
+                if (extractLibs) {
+                   // 同样只有当so库发生变化时，才会再次拷贝
+                    copyRet = NativeLibraryHelper.copyNativeBinariesForSupportedAbi(handle,
+                            nativeLibraryRoot, abiList, useIsaSpecificSubdirs);
+                } else {
+                    copyRet = NativeLibraryHelper.findSupportedAbi(handle, abiList);
+                }
+
+                if (copyRet < 0 && copyRet != PackageManager.NO_NATIVE_LIBRARIES) {
+                    throw new PackageManagerException(INSTALL_FAILED_INTERNAL_ERROR,
+                            "Error unpackaging native libs for app, errorCode=" + copyRet);
+                }
+
+                // 因为只有一个so库文件夹，所以只需要设置主abi即可
+                if (copyRet >= 0) {
+                    pkg.applicationInfo.primaryCpuAbi = abiList[copyRet];
+                } else if (copyRet == PackageManager.NO_Message1NATIVE_LIBRARIES && cpuAbiOverride != null) {
+                    pkg.applicationInfo.primaryCpuAbi = cpuAbiOverride;
+                } else if (needsRenderScriptOverride) {
+                    pkg.Message1applicationInfo.primaryCpuAbi = abiList[0];
+                }
+            }
+        } catch (IOException ioe) {
+            Slog.e(TAG, "Unable to get canonical file " + ioe.toString());
+        } finally {
+            IoUtils.closeQuietly(handle);
+        }
+
+        // Now that we've calculated the ABIs and determined if it's an internal app,
+        // we will go ahead and populate the nativeLibraryPath.
+        // 再次执行该方法，设置pkg中的applicationInfo的字段
+        // secondaryNativeLibraryDir
+        setNativeLibraryPaths(pkg);
+    }
+
+```
+接下来调用下面的代码进行了dexopt操作：
+
+```java
+// Run dexopt before old package gets removed, to minimize time when app is unavailable
+int result = mPackageDexOptimizer
+        .performDexOpt(pkg, null /* instruction sets */, false /* forceDex */,
+                false /* defer */, false /* inclDependencies */);
+if (result == PackageDexOptimizer.DEX_OPT_FAILED) {
+    res.setError(INSTALL_FAILED_DEXOPT, "Dexopt failed for " + pkg.codePath);
+    return;
+}
+```
+
+代码如下：
+
+```java
+int performDexOpt(PackageParser.Package pkg, String[] instructionSets,
+        boolean forceDex, boolean defer, boolean inclDependencies) {
+    ArraySet<String> done;
+    if (inclDependencies && (pkg.usesLibraries != null || pkg.usesOptionalLibraries != null)) {
+        done = new ArraySet<String>();
+        done.add(pkg.packageName);
+    } else {
+      // 走这个分支
+        done = null;
+    }
+    synchronized (mPackageManagerService.mInstallLock) {
+        final boolean useLock = mSystemReady;
+        if (useLock) {
+            mDexoptWakeLock.setWorkSource(new WorkSource(pkg.applicationInfo.uid));
+            mDexoptWakeLock.acquire();
+        }
+        try {
+            // -----------------调用下面的方法
+            return performDexOptLI(pkg, instructionSets, forceDex, defer, done);
+        } finally {
+            if (useLock) {
+                mDexoptWakeLock.release();
+            }
+        }
+    }
+}
+```
+
+```java
+private int performDexOptLI(PackageParser.Package pkg, String[] targetInstructionSets,
+          boolean forceDex, boolean defer, ArraySet<String> done) {
+
+      //  传入的targetInstructionSets为null
+      //  所以instructionSets为前面设置pkg.applicationInfo的主次abi值
+      // 如果没有so库，也就没有设置主次abi,这时以ro.product.cpu.abilist列表第一个值，获取isa
+      final String[] instructionSets = targetInstructionSets != null ?
+              targetInstructionSets : getAppDexInstructionSets(pkg.applicationInfo);
+
+      // done 为null。所以跳过
+      if (done != null) {
+          done.add(pkg.packageName);
+          if (pkg.usesLibraries != null) {
+              performDexOptLibsLI(pkg.usesLibraries, instructionSets, forceDex, defer, done);
+          }
+          if (pkg.usesOptionalLibraries != null) {
+              performDexOptLibsLI(pkg.usesOptionalLibraries, instructionSets, forceDex, defer,
+                      done);
+          }
+      }
+
+      if ((pkg.applicationInfo.flags & ApplicationInfo.FLAG_HAS_CODE) == 0) {
+          return DEX_OPT_SKIPPED;
+      }
+
+      final boolean vmSafeMode = (pkg.applicationInfo.flags & ApplicationInfo.FLAG_VM_SAFE_MODE) != 0;
+      final boolean debuggable = (pkg.applicationInfo.flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+
+      final List<String> paths = pkg.getAllCodePathsExcludingResourceOnly();
+      boolean performedDexOpt = false;
+      // There are three basic cases here:
+      // 1.) we need to dexopt, either because we are forced or it is needed
+      // 2.) we are deferring a needed dexopt
+      // 3.) we are skipping an unneeded dexopt
+      final String[] dexCodeInstructionSets = getDexCodeInstructionSets(instructionSets);
+      for (String dexCodeInstructionSet : dexCodeInstructionSets) {
+          if (!forceDex && pkg.mDexOptPerformed.contains(dexCodeInstructionSet)) {
+              continue;
+          }
+
+          for (String path : paths) {
+              final int dexoptNeeded;
+              if (forceDex) {
+                // 为false,所以不走这里
+                  dexoptNeeded = DexFile.DEX2OAT_NEEDED;
+              } else {
+                  try {
+                    // 因为是在安装apk，所以getDexOptNeeded返回的是DEX2OAT_NEEDED
+                      dexoptNeeded = DexFile.getDexOptNeeded(path, pkg.packageName,
+                              dexCodeInstructionSet, defer);
+                  } catch (IOException ioe) {
+                      Slog.w(TAG, "IOException reading apk: " + path, ioe);
+                      return DEX_OPT_FAILED;
+                  }
+              }
+
+              if (!forceDex && defer && dexoptNeeded != DexFile.NO_DEXOPT_NEEDED) {
+                  // We're deciding to defer a needed dexopt. Don't bother dexopting for other
+                  // paths and instruction sets. We'll deal with them all together when we process
+                  // our list of deferred dexopts.
+                  addPackageForDeferredDexopt(pkg);
+                  return DEX_OPT_DEFERRED;
+              }
+
+              if (dexoptNeeded != DexFile.NO_DEXOPT_NEEDED) {
+                  final String dexoptType;
+                  String oatDir = null;
+                  if (dexoptNeeded == DexFile.DEX2OAT_NEEDED) {
+                      dexoptType = "dex2oat";
+                      try {
+                        // 获取oat目录：/data/app/vmdl<安装回话id>.tmp/oat
+                          oatDir = createOatDirIfSupported(pkg, dexCodeInstructionSet);
+                      } catch (IOException ioe) {
+                          Slog.w(TAG, "Unable to create oatDir for package: " + pkg.packageName);
+                          return DEX_OPT_FAILED;
+                      }
+                  } else if (dexoptNeeded == DexFile.PATCHOAT_NEEDED) {
+                      dexoptType = "patchoat";
+                  } else if (dexoptNeeded == DexFile.SELF_PATCHOAT_NEEDED) {
+                      dexoptType = "self patchoat";
+                  } else {
+                      throw new IllegalStateException("Invalid dexopt needed: " + dexoptNeeded);
+                  }
+
+
+                  // 开始执行dex2oat
+                  Log.i(TAG, "Running dexopt (" + dexoptType + ") on: " + path + " pkg="
+                          + pkg.applicationInfo.packageName + " isa=" + dexCodeInstructionSet
+                          + " vmSafeMode=" + vmSafeMode + " debuggable=" + debuggable
+                          + " oatDir = " + oatDir);
+                  final int sharedGid = UserHandle.getSharedAppGid(pkg.applicationInfo.uid);
+                  final int ret = mPackageManagerService.mInstaller.dexopt(path, sharedGid,
+                          !pkg.isForwardLocked(), pkg.packageName, dexCodeInstructionSet,
+                          dexoptNeeded, vmSafeMode, debuggable, oatDir);
+
+                  // Dex2oat might fail due to compiler / verifier errors. We soldier on
+                  // regardless, and attempt to interpret the app as a safety net.
+                  if (ret == 0) {
+                      performedDexOpt = true;
+                  }
+              }
+          }    
+          pkg.mDexOptPerformed.add(dexCodeInstructionSet);
+      }
+
+      return performedDexOpt ? DEX_OPT_PERFORMED : DEX_OPT_SKIPPED;
+  }
+
+```
+这里执行dexopt实际上是在执行dex2oat，用来将apk中的dex文件转换为oat文件。值得注意的是，Android 6.0之前生成的oat文件都在
+
+```shell
+/data/dalvik_cache/
+```
+文件夹中，从Android 6.0 开始这个文件夹中只存放系统内置应用的oat文件，用户安装的app的oat文件在，最终会在
+
+```shell
+/data/app/包名/oat/<isa>/
+```
+继续分析installPackageLI：
+
+```java
+if (!args.doRename(res.returnCode, pkg, oldCodePath)) {
+            res.setError(INSTALL_FAILED_INSUFFICIENT_STORAGE, "Failed rename");
+            return;
+        }
+
+```
+这段代码作用从名字上就很清楚了:重命名。就是将
+```shell
+/data/app/vmdl<安装会话id>.tmp
+```
+重名为
+```shell
+/data/app/包名-suffix
+```
+suffix为1,2.......
+
+同时更新pkg中的受影响的字段。
+
+继续分析installPackageLI：
+```java
+startIntentFilterVerifications(args.user.getIdentifier(), replace, pkg);
+
+      if (replace) {
+        // 如果是覆盖安装，则走这里
+          replacePackageLI(pkg, parseFlags, scanFlags | SCAN_REPLACING, args.user,
+                  installerPackageName, volumeUuid, res);
+      } else {
+        // 初次安装，走这里
+          installNewPackageLI(pkg, parseFlags, scanFlags | SCAN_DELETE_DATA_ON_FAILURES,
+                  args.user, installerPackageName, volumeUuid, res);
+      }
+      synchronized (mPackages) {
+          final PackageSetting ps = mSettings.mPackages.get(pkgName);
+          if (ps != null) {
+              res.newUsers = ps.queryInstalledUsers(sUserManager.getUserIds(), true);
+          }
+      }
+```
+```java
+private void installNewPackageLI(PackageParser.Package pkg, int parseFlags, int scanFlags,
+        UserHandle user, String installerPackageName, String volumeUuid,
+        PackageInstalledInfo res) {
+    // Remember this for later, in case we need to rollback this install
+    String pkgName = pkg.packageName;
+
+    if (DEBUG_INSTALL) Slog.d(TAG, "installNewPackageLI: " + pkg);
+    final boolean dataDirExists = Environment
+            .getDataUserPackageDirectory(volumeUuid, UserHandle.USER_OWNER, pkgName).exists();
+    synchronized(mPackages) {
+
+        // 判断是否构成升级关系
+        if (mSettings.mRenamedPackages.containsKey(pkgName)) {
+            res.setError(INSTALL_FAILED_ALREADY_EXISTS, "Attempt to re-install " + pkgName
+                    + " without first uninstalling package running as "
+                    + mSettings.mRenamedPackages.get(pkgName));
+            return;
+        }
+        // 看是否已经安装了
+        if (mPackages.containsKey(pkgName)) {
+            // Don't allow installation over an existing package with the same name.
+            res.setError(INSTALL_FAILED_ALREADY_EXISTS, "Attempt to re-install " + pkgName
+                    + " without first uninstalling.");
+            return;
+        }
+    }
+
+    try {
+      // 很熟悉了吧，这里又调用了scanPackageLI
+        PackageParser.Package newPackage = scanPackageLI(pkg, parseFlags, scanFlags,
+                System.currentTimeMillis(), user);
+
+        updateSettingsLI(newPackage, installerPackageName, volumeUuid, null, null, res, user);
+
+        if (res.returnCode != PackageManager.INSTALL_SUCCEEDED) {
+
+            deletePackageLI(pkgName, UserHandle.ALL, false, null, null,
+                    dataDirExists ? PackageManager.DELETE_KEEP_DATA : 0,
+                            res.removedInfo, true);
+        }
+
+    } catch (PackageManagerException e) {
+        res.setError("Package couldn't be installed in " + pkg.codePath, e);
+    }
+}
+```
+
+重点又回到了scanPackageLI参数为Package的方法了。该方法内部又调用scanPackageDirtyLI方法,前面文章详细讲解过了，这里值贴出与用户安装app相关的代码
+
+```java
+private PackageParser.Package scanPackageDirtyLI(PackageParser.Package pkg, int parseFlags,
+            int scanFlags, long currentTime, UserHandle user) throws PackageManagerException {
+        final File scanFile = new File(pkg.codePath);
+         ........................
+        if ((parseFlags&PackageParser.PARSE_IS_SYSTEM) != 0) {
+            pkg.applicationInfo.flags |= ApplicationInfo.FLAG_SYSTEM;
+        } else {
+            // Only allow system apps to be flagged as core apps.
+            pkg.coreApp = false;
+        }
+
+       .........................................
+        // Initialize package source and resource directories
+        File destCodeFile = new File(pkg.applicationInfo.getCodePath());
+        File destResourceFile = new File(pkg.applicationInfo.getResourcePath());
+
+        SharedUserSetting suid = null;
+        PackageSetting pkgSetting = null;
+        .............................................
+        // writer
+        synchronized (mPackages) {
+            if (pkg.mSharedUserId != null) {
+              .................................
+            }
+
+            // Check if we are renaming from an original package name.
+            PackageSetting origPackage = null;
+            String realName = null;
+            if (pkg.mOriginalPackages != null) {
+              ...............................
+            }
+
+            ..................................
+            // 很重要，在这个方法里面，给该apk分配了UID
+            // 并且将一些信息记录当前用户的包状态文件：
+            // /data/system/users/userid/package-restrictions.xml
+            // 不如当前app是否被隐藏，或者禁用，以及当前app哪些组件被禁用等。
+            pkgSetting = mSettings.getPackageLPw(pkg, origPackage, realName, suid, destCodeFile,
+                    destResourceFile, pkg.applicationInfo.nativeLibraryRootDir,
+                    pkg.applicationInfo.primaryCpuAbi,
+                    pkg.applicationInfo.secondaryCpuAbi,
+                    pkg.applicationInfo.flags, pkg.applicationInfo.privateFlags,
+                    user, false);
+            if (pkgSetting == null) {
+                throw new PackageManagerException(INSTALL_FAILED_INSUFFICIENT_STORAGE,
+                        "Creating application package " + pkg.packageName + " failed");
+            }
+
+
+          .................................
+            pkg.applicationInfo.uid = pkgSetting.appId;
+            pkg.mExtras = pkgSetting;
+          .....................................
+        //检查安装的app与已经安装的app定义的组件是否冲突
+            if ((scanFlags & SCAN_NEW_INSTALL) != 0) {
+                final int N = pkg.providers.size();
+                int i;
+                for (i=0; i<N; i++) {
+                    PackageParser.Provider p = pkg.providers.get(i);
+                    ...................................
+                    }
+                }
+            }
+            ....................................
+        final String pkgName = pkg.packageName;
+
+        final long scanFileTime = scanFile.lastModified();
+        final boolean forceDex = (scanFlags & SCAN_FORCE_DEX) != 0;
+        //修改进程信息，如名字等
+        pkg.applicationInfo.processName = fixProcessName(
+                pkg.applicationInfo.packageName,
+                pkg.applicationInfo.processName,
+                pkg.applicationInfo.uid);
+
+        File dataPath;
+        if (mPlatformPackage == pkg) {
+          ....................................
+
+        } else {
+            // 开始创建数据沙箱目录
+            dataPath = Environment.getDataUserPackageDirectory(pkg.volumeUuid,
+                    UserHandle.USER_OWNER, pkg.packageName);
+
+            boolean uidError = false;
+            if (dataPath.exists()) {
+              ..........................................
+            } else {
+              ...............
+              // 调用守护进程installd来完成实际的创建工作
+              // installd的install会创建"/data/data/包名",权限751，默认是给userid为0的用户使用
+              // 其内部会调用installd的createUserData为每一个非0的系统用户都创建沙箱目录
+              // /data/user/userid/包名 ，并设置权限751，chown设置为该用户的属主
+                int ret = createDataDirsLI(pkg.volumeUuid, pkgName, pkg.applicationInfo.uid,
+                        pkg.applicationInfo.seinfo);
+                if (ret < 0) {
+                    // Error from installer
+                    throw new PackageManagerException(INSTALL_FAILED_INSUFFICIENT_STORAGE,
+                            "Unable to create data dirs [errorCode=" + ret + "]");
+                }
+
+              ............................................
+        }
+
+        final String path = scanFile.getPath();
+        final String cpuAbiOverride = deriveAbiOverride(pkg.cpuAbiOverride, pkgSetting);
+
+        if ((scanFlags & SCAN_NEW_INSTALL) == 0) {
+          ..........................................
+        } else {
+            if ((scanFlags & SCAN_MOVE) != 0) {
+              .....................................
+            }
+
+      .........................
+        }
+
+        // 开始创建so库文件的连接
+        if (DEBUG_INSTALL) Slog.i(TAG, "Linking native library dir for " + path);//========================================
+        final int[] userIds = sUserManager.getUserIds();
+        synchronized (mInstallLock) {
+          ................................
+            //只有设置了主abi,且主abi的so库是32位的才进行软连接
+            if (pkg.applicationInfo.primaryCpuAbi != null &&
+                    !VMRuntime.is64BitAbi(pkg.applicationInfo.primaryCpuAbi)) {
+                final String nativeLibPath = pkg.applicationInfo.nativeLibraryDir;
+                for (int userId : userIds) {
+                  // 对该app在所有用户中的沙箱目录中创建lib指向/data/app/包名-suffix/lib/<isa>/的软连接
+                    if (mInstaller.linkNativeLibraryDirectory(pkg.volumeUuid, pkg.packageName,
+                            nativeLibPath, userId) < 0) {
+                        throw new PackageManagerException(INSTALL_FAILED_INTERNAL_ERROR,
+                                "Failed linking native library dir (user=" + userId + ")");
+                    }
+                }
+            }
+        }
+
+        pkgSetting.primaryCpuAbiString = pkg.applicationInfo.primaryCpuAbi;
+        pkgSetting.secondaryCpuAbiString = pkg.applicationInfo.secondaryCpuAbi;
+        pkgSetting.cpuAbiOverrideString = cpuAbiOverride;
+
+        ...........................
+        pkgSetting.legacyNativeLibraryPathString = pkg.applicationInfo.nativeLibraryRootDir;
+
+      ..........................................
+      // 将安装该apk是产生的PackageSetting对象pkgSetting，加入mSettings中的mPackages，以及也加入到PMS中的mPackages
+        // writer
+        synchronized (mPackages) {
+            // Add the new setting to mSettings
+            mSettings.insertPackageSettingLPw(pkgSetting, pkg);
+            // Add the new setting to mPackages
+            mPackages.put(pkg.applicationInfo.packageName, pkg);
+
+            // Add the package's KeySets to the global KeySetManagerService
+            ksms.addScannedPackageLPw(pkg);
+
+            int N = pkg.providers.size();
+            StringBuilder r = null;
+            int i;
+            // 将安装的apk中的内容提供者加入到PMS中的mProviders
+            for (i=0; i<N; i++) {
+              ...................
+                mProviders.addProvider(p);
+            ..........................
+            }
+            if (r != null) {
+                if (DEBUG_PACKAGE_SCANNING) Log.d(TAG, "  Providers: " + r);
+            }
+
+            N = pkg.services.size();
+            r = null;
+              // 将安装的apk中的service加入到PMS中的mServices
+            for (i=0; i<N; i++) {
+            .......................
+                mServices.addService(s);
+            ......................
+            }
+            if (r != null) {
+                if (DEBUG_PACKAGE_SCANNING) Log.d(TAG, "  Services: " + r);
+            }
+
+          // 将安装的apk中的receivers加入到PMS中的mReceivers
+            N = pkg.receivers.size();
+            r = null;
+            for (i=0; i<N; i++) {
+            .....................
+                mReceivers.addActivity(a, "receiver");
+          ............
+            }
+            if (r != null) {
+                if (DEBUG_PACKAGE_SCANNING) Log.d(TAG, "  Receivers: " + r);
+            }
+
+            N = pkg.activities.size();
+            r = null;
+        // 将安装的apk中的activity加入到PMS中的mActivities
+            for (i=0; i<N; i++) {
+            ....................................
+                mActivities.addActivity(a, "activity");
+            .............................
+            }
+            if (r != null) {
+                if (DEBUG_PACKAGE_SCANNING) Log.d(TAG, "  Activities: " + r);
+            }
+
+            N = pkg.permissionGroups.size();
+            r = null;
+            for (i=0; i<N; i++) {
+                PackageParser.PermissionGroup pg = pkg.permissionGroups.get(i);
+                PackageParser.PermissionGroup cur = mPermissionGroups.get(pg.info.name);
+                if (cur == null) {
+                    mPermissionGroups.put(pg.info.name, pg);
+                .........................
+                } else {
+                .............................
+                }
+            }
+            if (r != null) {
+                if (DEBUG_PACKAGE_SCANNING) Log.d(TAG, "  Permission Groups: " + r);
+            }
+
+            N = pkg.permissions.size();
+            r = null;
+            for (i=0; i<N; i++) {
+                ....................................
+                if (pkg.applicationInfo.targetSdkVersion > Build.VERSION_CODES.LOLLIPOP_MR1) {
+                    p.group = mPermissionGroups.get(p.info.group);
+                .....................................
+                }
+
+              ....................
+
+                if (bp == null) {
+                    bp = new BasePermission(p.info.name, p.info.packageName,
+                            BasePermission.TYPE_NORMAL);
+                    permissionMap.put(p.info.name, bp);
+                }
+          ................................
+          //设置instrumentation
+            N = pkg.instrumentation.size();
+            r = null;
+            for (i=0; i<N; i++) {
+                PackageParser.Instrumentation a = pkg.instrumentation.get(i);
+                a.info.packageName = pkg.applicationInfo.packageName;
+              .................................
+            }
+            if (r != null) {
+                if (DEBUG_PACKAGE_SCANNING) Log.d(TAG, "  Instrumentation: " + r);
+            }
+
+            if (pkg.protectedBroadcasts != null) {
+                N = pkg.protectedBroadcasts.size();
+                for (i=0; i<N; i++) {
+                    mProtectedBroadcasts.add(pkg.protectedBroadcasts.get(i));
+                }
+            }
+
+            pkgSetting.setTimeStamp(scanFileTime);
+
+            ..............................
+        return pkg;
+    }
+
+```
+从installPackageLI的重要执行过程如下图所示：
+
+![][1]
+
+执行完installPackageLI之后，返回processPendingInstall方法中，如下所示：
+
+```java
+private void processPendingInstall(final InstallArgs args, final int currentStatus) {
+       // Queue up an async operation since the package installation may take a little while.
+       mHandler.post(new Runnable() {
+           public void run() {
+            ...........................
+               if (res.returnCode == PackageManager.INSTALL_SUCCEEDED) {
+                    //一般情况下，什么都不会做的
+                   args.doPreInstall(res.returnCode);
+                   synchronized (mInstallLock) {
+                       installPackageLI(args, res);
+                   }
+                   // 安装失败时，删除/data/app/包名中的内容
+                   args.doPostInstall(res.returnCode, res.uid);
+               }
+            .....................................
+            /* 省略关于云备份的代码*/
+            .....................................
+               if (!doRestore) {
+                   // No restore possible, or the Backup Manager was mysteriously not
+                   // available -- just fire the post-install work request directly.
+                   if (DEBUG_INSTALL) Log.v(TAG, "No restore - queue post-install for " + token);
+                   Message msg = mHandler.obtainMessage(POST_INSTALL, token, 0);
+                   mHandler.sendMessage(msg);
+               }
+           }
+       });
+   }
+
+接下来就是发送POST_INSTALL消息，该消息的处理主要就是在发送广播，应用安装完成之后要通知系统中的其他应用开始处理，比如在launcher需要增加app的图标等。等发完广播，安装也就结束了，最后通过最初安装是传入的安装观察者observer返回最初的调用者。
+
+发送的广播有
+
+1. android.intent.action.PACKAGE_ADDED
+
+2. 覆盖安装时，还要发送:android.intent.extra.REPLACING
+
+代码如下：
+
+```java
+sendPackageBroadcast(Intent.ACTION_PACKAGE_ADDED,
+        packageName, extras, null, null, firstUsers);
+
+final boolean update = res.removedInfo.removedPackage != null;
+if (update) {
+    extras.putBoolean(Intent.EXTRA_REPLACING, true);
+}
+sendPackageBroadcast(Intent.ACTION_PACKAGE_ADDED,
+        packageName, extras, null, null, updateUsers);
+if (update) {
+    sendPackageBroadcast(Intent.ACTION_PACKAGE_REPLACED,
+            packageName, extras, null, null, updateUsers);
+    sendPackageBroadcast(Intent.ACTION_MY_PACKAGE_REPLACED,
+            null, null, packageName, null, updateUsers);
+    ................
+```
+
+
+[1]:http://7xj6ce.com1.z0.glb.clouddn.com/PMS-11.png

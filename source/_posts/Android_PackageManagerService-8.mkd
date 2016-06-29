@@ -12,7 +12,7 @@ date: 2016-06-26 15:26:07
 
 当使用Intent安装一个Android存储中的一个apk文件时，实际上是调用Android系统一个内部应用packageinstaller来完成的。这个内置系统应用，会显示安装过程，自然也有界面了，大家应该非常熟悉了，无非就是显示一些进度条，此app有哪些权限，以及安装完成自后，是否打开等。
 
-packageinstaller内部也是对PMS的调用，安装时，会先调用PMS相关接口，解析APK文件，也就是其AndroidMainifest.xml文件，这样就得到了该app的组件，权限，包名等信息。然后以包名为key,检查该app是否已经安装，安装的话，设置replace的flag.
+packageinstaller内部也是对PMS的调用，安装时，会先调用PMS相关接口，解析APK文件，也就是其AndroidMainifest.xml文件，这样就得到了该app的组件，权限，包名等信息。然后以包名为key,检查该app是否已经安装，安装的话，设置replace的flag:INSTALL_REPLACE_EXISTING.
 
 如果是之前没安装过的，那么会弹出一个activity，显示该app有哪些权限，底部有两个Button:"取消"和“安装”。点击"安装"，就开始安装了。
 
@@ -76,6 +76,8 @@ public void installPackage(String originPath, IPackageInstallObserver2 observer,
                verificationParams, packageAbiOverride, UserHandle.getCallingUserId());
    }
 ```
+这里重点提醒一下最后一个参数packageAbiOverride传入的是null,意味着后续
+
 整个安装过程很复杂，大体上可分为两个过程：
 
 1. 权限检查
@@ -198,10 +200,11 @@ void enforceCrossUserPermission(int callingUid, int userId, boolean requireFullP
        mHandler.sendMessage(msg);
    }
 ```
-构造InstallParams，然后利用Android中的Handler机制，发送给相关的线程进行安装。
+构造InstallParams，注意packageAbiOverride为null，然后利用Android中的Handler机制，发送给相关的线程进行安装。
 
-installPackageAsUser整个执行逻辑如![][1]所示。
+installPackageAsUser整个执行逻辑如下图所示所示。
 
+![][1]
 
 
 ### 复制文件
@@ -508,6 +511,7 @@ startCopy()方法通过调用其子类InstallParams的handleStartCopy()来完成
                 }
             }
 
+            // 其中abiOverride为null
             final InstallArgs args = createInstallArgs(this);
             mArgs = args;
 
@@ -699,6 +703,101 @@ final File libraryRoot = new File(codeFile, LIB_DIR_NAME);
 ```
 如果是x86，则arm替换为x86等。
 
+这里强调下abiOverride为null。
+
+可以使用下面的方法查看设备中abi的情况：
+
+```shell
+root@hammerhead:/data/system # getprop | grep abi                              
+[ro.product.cpu.abi]: [armeabi-v7a]
+[ro.product.cpu.abi2]: [armeabi]
+[ro.product.cpu.abilist]: [armeabi-v7a,armeabi]
+[ro.product.cpu.abilist32]: [armeabi-v7a,armeabi]
+[ro.product.cpu.abilist64]: []
+
+```
+从结果中可以看到我们的设备不支持64位 abi.copyNativeBinariesWithOverride的逻辑如下所示：
+
+```java
+public static int copyNativeBinariesWithOverride(Handle handle, File libraryRoot,
+            String abiOverride) {
+        try {
+
+            // 如果apk中的lib中有诸如armeabi,areabi-v7a,x86等文件夹，
+            // 走这个分支，此时忽略abiOverride
+            if (handle.multiArch) {
+                // Warn if we've set an abiOverride for multi-lib packages..
+                // By definition, we need to copy both 32 and 64 bit libraries for
+                // such packages.
+                if (abiOverride != null && !CLEAR_ABI_OVERRIDE.equals(abiOverride)) {
+                    Slog.w(TAG, "Ignoring abiOverride for multi arch application.");
+                }
+
+                int copyRet = PackageManager.NO_NATIVE_LIBRARIES;
+                if (Build.SUPPORTED_32_BIT_ABIS.length > 0) {
+
+                    // 因为有多个so库的文件夹，所以要选择使用合适的文件夹中的so库
+                    // 方法就是获取ro.product.cpu.abilist32列表中的abi，依次和so库文件夹的名字对比，发现匹配的文件夹，
+                    // 就将该文件夹中的so库拷贝/data/app/vmdl.<安装回话id>.tmp/lib/arm/,同时将匹配的文件夹名字在
+                    // ro.product.cpu.abilist32列表中的索引返回
+                    copyRet = copyNativeBinariesForSupportedAbi(handle, libraryRoot,
+                            Build.SUPPORTED_32_BIT_ABIS, true /* use isa specific subdirs */);
+                    if (copyRet < 0 && copyRet != PackageManager.NO_NATIVE_LIBRARIES &&
+                            copyRet != PackageManager.INSTALL_FAILED_NO_MATCHING_ABIS) {
+                        Slog.w(TAG, "Failure copying 32 bit native libraries; copyRet=" +copyRet);
+                        return copyRet;
+                    }
+                }
+
+                if (Build.SUPPORTED_64_BIT_ABIS.length > 0) {
+                  // 如果设备支持64位 abi,那么同样获取ro.product.cpu.abilist64列表中的abi，依次和so库文件夹的名字对比，发现匹配的文件夹，
+                  // 就将该文件夹中的so库拷贝/data/app/vmdl.<安装回话id>.tmp/lib/arm64/,同时将匹配的文件夹名字在
+                  // ro.product.cpu.abilist64列表中的索引返回
+                    copyRet = copyNativeBinariesForSupportedAbi(handle, libraryRoot,
+                            Build.SUPPORTED_64_BIT_ABIS, true /* use isa specific subdirs */);
+                    if (copyRet < 0 && copyRet != PackageManager.NO_NATIVE_LIBRARIES &&
+                            copyRet != PackageManager.INSTALL_FAILED_NO_MATCHING_ABIS) {
+                        Slog.w(TAG, "Failure copying 64 bit native libraries; copyRet=" +copyRet);
+                        return copyRet;
+                    }
+                }
+            } else {
+              // 如果apk中的lib文件夹中只有一个so库文件夹，那么走这个分支
+                String cpuAbiOverride = null;
+                if (CLEAR_ABI_OVERRIDE.equals(abiOverride)) {
+                    cpuAbiOverride = null;
+                } else if (abiOverride != null) {
+                    cpuAbiOverride = abiOverride;
+                }
+
+                // 因为传入的cpuAbiOverride为null，所以
+                // abiList 就是ro.product.cpu.abilist列表中的值
+                String[] abiList = (cpuAbiOverride != null) ?
+                        new String[] { cpuAbiOverride } : Build.SUPPORTED_ABIS;
+                if (Build.SUPPORTED_64_BIT_ABIS.length > 0 && cpuAbiOverride == null &&
+                        hasRenderscriptBitcode(handle)) {
+                    abiList = Build.SUPPORTED_32_BIT_ABIS;
+                }
+
+                // 同样是将abiList中的abi值依次和so库的文件夹名字进行匹配，如果匹配，就把匹配的abi的在abiList中的索引返回，
+                // 并且把so库拷贝到/data/app/vmdl.<安装回话id>.tmp/lib/XXisaXX/下面
+                // xxisaxx 可以是arm arm64 x86等，这取决于abi的值
+                int copyRet = copyNativeBinariesForSupportedAbi(handle, libraryRoot, abiList,
+                        true /* use isa specific subdirs */);
+                if (copyRet < 0 && copyRet != PackageManager.NO_NATIVE_LIBRARIES) {
+                    Slog.w(TAG, "Failure copying native libraries [errorCode=" + copyRet + "]");
+                    return copyRet;
+                }
+            }
+
+            return PackageManager.INSTALL_SUCCEEDED;
+        } catch (IOException e) {
+            Slog.e(TAG, "Copying native libraries failed", e);
+            return PackageManager.INSTALL_FAILED_INTERNAL_ERROR;
+        }
+    }
+
+```
 
 [1]: http://7xj6ce.com1.z0.glb.clouddn.com/PMS-7.png
 [2]: http://7xj6ce.com1.z0.glb.clouddn.com/PMS-8.png
