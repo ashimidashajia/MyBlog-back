@@ -1,0 +1,234 @@
+---
+layout: post
+title: Android6.0之AMS数据结构梳理
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-07-04 18:00:56
+
+---
+
+正式分析AMS代码之前，还是先搞清楚与AMS相关的数据结构吧。
+
+<!--more-->
+
+
+### ActivityManager
+
+上一篇中提到上层开发中使用如下代码获得AMS的一个代理：
+
+```java
+ ActivityManager am =(ActivityManager)getSystemService(Context.ACTIVITY_SERVICE);
+```
+
+官方文档中指出ActivityManager是与系统所有正在运行着的Acitivity进行交互，对系统所有运行中的Activity相关信息（Task，Memory，Service，App）进行管理和维护；提供了相应的接口用于获取这些信息。
+
+源码路径：
+
+```shell
+Android-6/frameworks/base/core/java/android/app/ActivityManager.java
+```
+如ActivityManager提供的用于获取当前设备中运行的app进程信息api:
+```java
+public List<RunningAppProcessInfo> getRunningAppProcesses() {
+    try {
+        return ActivityManagerNative.getDefault().getRunningAppProcesses();
+    } catch (RemoteException e) {
+        return null;
+    }
+}
+```
+
+由代码可以看出信息的交互不是真正的由ActivityManager类来负责，而是通过ActivityManagerNative.getDefault()的操作得到IActivityManager接口得到具体的操作。
+
+可见ActivityManager只是对ActivityManagerNative的一个包装而已。
+
+### ActivityManagerNative
+
+源码路径：
+
+```shell
+ Android-6/frameworks/base/core/java/android/app/ActivityManagerNative.java
+```
+ActivityManagerNative是个抽象类,类定义节选如下：
+
+```java
+public abstract class ActivityManagerNative extends Binder implements IActivityManager
+{
+  .............
+static public IActivityManager getDefault() {
+       return gDefault.get();
+   }
+private static final Singleton<IActivityManager> gDefault = new Singleton<IActivityManager>() {
+     protected IActivityManager create() {
+         // 从SM中找到AMS的引用对象，activity是AMS在SM中的名字
+         IBinder b = ServiceManager.getService("activity");
+         if (false) {
+             Log.v("ActivityManager", "default service binder = " + b);
+         }
+         // 将AMS引用对象转换为代理对象
+         IActivityManager am = asInterface(b);
+         if (false) {
+             Log.v("ActivityManager", "default service = " + am);
+         }
+         return am;
+     }
+ };
+
+ static public IActivityManager asInterface(IBinder obj) {
+         if (obj == null) {
+             return null;
+         }
+         // 作为client，queryLocalInterface返回的是null
+         IActivityManager in =
+             (IActivityManager)obj.queryLocalInterface(descriptor);
+         if (in != null) {
+             return in;
+         }
+
+         return new ActivityManagerProxy(obj);
+     }
+.........................
+}
+```
+从代码中很明显的看出来ActivityManagerNative使用了Binder框架，而且是没有AIDL的BInder框架。给客户端返回的代理对象是ActivityManagerProxyd对象。
+
+
+### ActivityManagerProxy
+
+源码路径：
+
+```shell
+ Android-6/frameworks/base/core/java/android/app/ActivityManagerNative.java
+```
+其类定义节选如下：
+
+```java
+class ActivityManagerProxy implements IActivityManager
+{
+   private IBinder mRemote;
+  ................
+  public ActivityManagerProxy(IBinder remote)
+  {
+      mRemote = remote;
+  }
+  ...................
+  public void killUid(int appId, int userId, String reason) throws RemoteException {
+    .................
+    mRemote.transact(KILL_UID_TRANSACTION, data, reply, 0);
+    ..............
+}
+...............
+}
+```
+ActivityManagerProxy类内聚了IBinder mRemote，mRemote构造方法中被初指向AMS的一个引用对象。
+
+通过killUid()方法可以看出ActivityManagerProxy提供的相关接口是通过这个AMS引用对象发起，由远端AMS完成并将结果返回的。是一个典型的Binder跨进程通信过程。
+
+
+
+### AMS入口点
+
+AMS是由systemServer启动的：
+
+源码路径
+
+```shell
+Android-6/frameworks/base/services/java/com/android/server/SystemServer.java
+```
+
+```java
+private void startBootstrapServices() {
+  ................................
+    // Activity manager runs the show.
+    mActivityManagerService = mSystemServiceManager.startService(
+            ActivityManagerService.Lifecycle.class).getService();
+    mActivityManagerService.setSystemServiceManager(mSystemServiceManager);
+    mActivityManagerService.setInstaller(installer);
+    ..........................
+    // Now that the power manager has been started, let the activity manager
+    // initialize power management features.
+    mActivityManagerService.initPowerManagement();
+    ..........................
+    // Set up the Application instance for the system process and get started.
+    mActivityManagerService.setSystemProcess();
+    ............................
+
+```
+从中可以看到AMS入口点是
+
+```java
+ActivityManagerService.Lifecycle.class
+```
+源码路径：
+```shell
+ Android-6/frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java
+```
+```java
+public static final class Lifecycle extends SystemService {
+    private final ActivityManagerService mService;
+
+    public Lifecycle(Context context) {
+        super(context);
+        mService = new ActivityManagerService(context);
+    }
+
+    @Override
+    public void onStart() {
+        mService.start();
+    }
+
+    public ActivityManagerService getService() {
+        return mService;
+    }
+}
+```
+
+类Lifecycle是ActivityManagerService类的一个内部类。可以看到Lifecycle构造函数中创建了ActivityManagerService实例，然后onStart()方法中调用了ActivityManagerService的start()方法开始AMS服务。
+
+
+ActivityManagerService类继承自ActivityManagerNative
+
+```java
+
+public final class ActivityManagerService extends ActivityManagerNative
+        implements Watchdog.Monitor, BatteryStatsImpl.BatteryCallback {
+
+...........
+}
+```
+
+### IActivityManager
+
+源码路径：
+
+```shell
+ Android-6/frameworks/base/core/java/android/app/ActivityManagerNative.java
+```
+
+```java
+public interface IActivityManager extends IInterface {
+    public int startActivity(IApplicationThread caller, String callingPackage, Intent intent,
+            String resolvedType, IBinder resultTo, String resultWho, int requestCode, int flags,
+            ProfilerInfo profilerInfo, Bundle options) throws RemoteException;
+    public int startActivityAsUser(IApplicationThread caller, String callingPackage, Intent intent,
+            String resolvedType, IBinder resultTo, String resultWho, int requestCode, int flags,
+            ProfilerInfo profilerInfo, Bundle options, int userId) throws RemoteException;
+    .............
+  }
+```
+AMS和其客户端都要实现IActivityManager中定义的接口。
+
+
+整个AMS框架中的类图如下图所示：
+
+![][1]
+
+ActivityManager调用getRunningAppProcesses 大致时序图如下所示
+
+![][2]
+
+
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-1.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-2.png

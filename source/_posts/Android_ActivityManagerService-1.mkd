@@ -1,0 +1,196 @@
+---
+layout: post
+title: Android6.0之AMS前奏
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-07-04 15:08:37
+
+---
+
+ActivityManagerService是Android提供的一个用于管理Activity以及其他组件运行状态的系统进程，简称AMS.
+
+<!--more-->
+
+AMS主要作用：
+
+1. Activity及其他三大组件的运行状态管理、进程管理、内存管理 (主要)
+
+2. 查询组件当前的运行情况
+
+3. 提供了系统运行时的查询
+
+通过am命令来实际感知一下AMS给我们提供了哪些功能。
+
+
+
+### am 命令
+
+
+
+| 命令                            | 功能          | 实现方法  |
+| -------------------------- ----|:-------------:|------------:|
+|am start [options] <INTENT>     | 启动Activity | startActivityAsUser |
+|am startservice <INTENT>       |  启动Service     | startService   |
+|am stopservice <INTENT>      |   停止Service    |  stopService  |
+|am broadcast <INTENT>       | 发送广播      |broadcastIntent    |
+|am kill <PACKAGE>      |  杀指定后台进程     |killBackgroundProcesses    |
+|am kill-all      | 杀所有后台进程	      |killAllBackgroundProcesses    |
+|am force-stop <PACKAGE>       |强杀进程       | forceStopPackage   |
+|am hang       |系统卡住       |  hang  |
+|am restart       |  重启     |  restart   |
+|am bug-report       |创建bugreport       | requestBugReport   |
+|am dumpheap <pid> <file>       | 进程pid的堆信息输出到file      |dumpheap    |
+|am send-trim-memory <pid>       |  收紧进程的内存     | setProcessMemoryTrimLevel   |
+|am monitor     |  监控     |MyActivityController.run    |
+
+am命令实的实现方式在Am.java，最终几乎都是调用ActivityManagerService相应的方法来完成的，am monitor除外。
+
+其他am命令
+```shell
+am restart: restart the user-space system.
+
+am idle-maintenance: perform idle maintenance now.
+
+am screen-compat: control screen compatibility mode of <PACKAGE>.
+
+am package-importance: print current importance of <PACKAGE>.
+
+am to-uri: print the given Intent specification as a URI.
+
+am to-intent-uri: print the given Intent specification as an intent: URI.
+
+am to-app-uri: print the given Intent specification as an android-app: URI.
+
+am switch-user: switch to put USER_ID in the foreground, starting
+  execution of that user if it is currently stopped.
+
+am start-user: start USER_ID in background if it is currently stopped,
+  use switch-user if you want to start the user in foreground.
+
+am stop-user: stop execution of USER_ID, not allowing it to run any
+  code until a later explicit start or switch to it.
+  -w: wait for stop-user to complete.
+
+am stack start: start a new activity on <DISPLAY_ID> using <INTENT>.
+
+am stack movetask: move <TASK_ID> from its current stack to the top (true) or   bottom (false) of <STACK_ID>.
+
+am stack resize: change <STACK_ID> size and position to <LEFT,TOP,RIGHT,BOTTOM>.
+```
+
+#### 启动activity
+
+使用Action方式打开系统设置-输入法设置
+
+```shell
+am start -a android.settings.INPUT_METHOD_SETTINGS
+```
+
+使用组件名方式启动浏览器
+
+```shell
+am start -n com.android.browser/com.android.browser.BrowserActivity
+```
+格式：
+
+```shell
+am start -n 包(package)名/包名.活动(activity)名称
+```
+
+打开拨号界面，并传递一个DATA_URI数据给拨号界面
+
+```shell
+am start -a android.intent.action.CALL -d tel:10086
+```
+
+#### 启动service
+
+使用ComponentName 方式启动一个Service
+
+```shell
+ am startservice com.some.package.name/.YourServiceSubClassName
+```
+
+#### 关闭指定包名的程序
+
+强制关闭应用，ps命令中也看不到该应用的信息。
+```shell
+am force-stop com.some.package
+```
+
+#### 杀死进程
+
+杀死与应用程序的包名称相关联的所有进程。该命令只会杀死安全的进程，不会影响用户体验。如果包名所示的程序正处在statk最前端，也就是用户正在使用该app,那么kill会无效。
+
+也就是说只有该包名所示的app处于后台，才生效。
+
+```shell
+am kill com.some.package
+```
+杀死之后，从任务栈中再次选中该app,该app会重新刷新数据启动。
+
+```shell
+am kill-all
+```
+杀死所有后台进程
+
+#### 发送广播
+
+```shell
+am broadcast -a 广播名称
+```
+
+#### 启动对测试实例的监视
+
+```shell
+adb shell am instrument -w com.android.phone.tests/com.android.phone.runners.FunctionalTestRunner
+```
+
+#### 搜集应用程序的函数调用
+
+```shell
+am profile start app包名 /data/local/tmp/profile.txt
+am profile stop app包名
+```
+
+app包名也可以换成进程号pid。
+
+#### 显示当前任务栈中的activity
+
+```shell
+am stack list
+```
+
+#### 收紧内存
+
+```shell
+am send-trim-memory  <pid> <level>
+```
+level取值范围为： HIDDEN、RUNNING_MODERATE、BACKGROUND、RUNNING_LOW、MODERATE、RUNNING_CRITICAL、COMPLETE。
+
+#### 其他常用参数
+
+-a <ACTION>: 指定Intent action， 实现原理Intent.setAction()；
+
+-n <COMPONENT>: 指定组件名，格式为{包名}/.{主Activity名}，实现原理Intent.setComponent(）；
+
+-d <DATA_URI>: 指定Intent data URI
+
+-t <MIME_TYPE>: 指定Intent MIME Type
+
+-c <CATEGORY> [-c <CATEGORY>] ...]:指定Intent category，实现原理Intent.addCategory()
+
+-p <PACKAGE>: 指定包名，实现原理Intent.setPackage();
+
+-f <FLAGS>: 添加flags，实现原理Intent.setFlags(int )，紧接着的参数必须是int型
+
+
+### 如何使用AMS
+
+使用如下代码即可获得AMS的一个代理对象。
+
+```java
+ ActivityManager am =(ActivityManager)getSystemService(Context.ACTIVITY_SERVICE);
+```
+
+然后就可以使用AMS提供的各种接口了。

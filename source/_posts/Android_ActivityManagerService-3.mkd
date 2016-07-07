@@ -1,0 +1,592 @@
+---
+layout: post
+title: Android6.0之AMS启动
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-07-05 10:47:41
+
+---
+
+现在可以分析AMS启动过程的代码了。
+
+<!--more-->
+
+### AMS入口点
+
+上一篇文章已经找到了AMS启动的入口点：
+
+源码路径：
+```shell
+ Android-6/frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java
+```
+```java
+public static final class Lifecycle extends SystemService {
+    private final ActivityManagerService mService;
+
+    public Lifecycle(Context context) {
+        super(context);
+        mService = new ActivityManagerService(context);
+    }
+
+    @Override
+    public void onStart() {
+        mService.start();
+    }
+
+    public ActivityManagerService getService() {
+        return mService;
+    }
+}
+```
+
+SystemService会创建Lifecycle对象，并调用其start()方法启动AMS。
+
+
+### AMS构造方法
+
+```java
+
+    // Note: This method is invoked on the main thread but may need to attach various
+    // handlers to other threads.  So take care to be explicit about the looper.
+    public ActivityManagerService(Context systemContext) {
+        mContext = systemContext;
+        mFactoryTest = FactoryTest.getMode();
+        // 获取运行在SystemServer中的Activity对象
+        mSystemThread = ActivityThread.currentActivityThread();
+
+        Slog.i(TAG, "Memory class: " + ActivityManager.staticGetMemoryClass());
+
+        // 创建用于消息处理的线程
+        // ServiceThread是专门为system service 提供looper运行环境的
+        // 无非就是开启一个线程运行looper.loop()
+        mHandlerThread = new ServiceThread(TAG,
+                android.os.Process.THREAD_PRIORITY_FOREGROUND, false /*allowIo*/);
+        // 开始looper.loop()消息处理循环
+        mHandlerThread.start();
+
+        // 创建Handler并关联looper
+        mHandler = new MainHandler(mHandlerThread.getLooper());
+
+        // 通过UiThread类，创建名为"android.ui"的线程，该线程类也是继承自ServiceThread
+        // 也就是说会创建一个looper
+        // AMS 创建uiHanler对象会将该Handler与android.ui线程中的Looepr关联
+        mUiHandler = new UiHandler();
+
+        // 创建前台广播接收器，运行超过10s将会放弃执行
+        mFgBroadcastQueue = new BroadcastQueue(this, mHandler,
+                "foreground", BROADCAST_FG_TIMEOUT, false);
+        // 创建后台广播接收器，运行超过60s会放弃执行
+        mBgBroadcastQueue = new BroadcastQueue(this, mHandler,
+                "background", BROADCAST_BG_TIMEOUT, true);
+        mBroadcastQueues[0] = mFgBroadcastQueue;
+        mBroadcastQueues[1] = mBgBroadcastQueue;
+
+        // 创建管理Service的对象
+        mServices = new ActiveServices(this);
+
+        // 创建管理组件provider的对象
+        mProviderMap = new ProviderMap(this);
+
+        // 得到
+        // /data
+        // /data/system
+        File dataDir = Environment.getDataDirectory();
+        File systemDir = new File(dataDir, "system");
+        // 创建 /data/system
+        systemDir.mkdirs();
+
+        //创建服务BatteryStatsService
+        mBatteryStatsService = new BatteryStatsService(systemDir, mHandler);
+        mBatteryStatsService.getActiveStatistics().readLocked();
+        mBatteryStatsService.scheduleWriteToDisk();
+        mOnBattery = DEBUG_POWER ? true
+                : mBatteryStatsService.getActiveStatistics().getIsOnBattery();
+        mBatteryStatsService.getActiveStatistics().setCallback(this);
+
+        //创建进程统计服务，信息保存在目录/data/system/procstats，
+        mProcessStats = new ProcessStatsService(this, new File(systemDir, "procstats"));
+
+        // 权限管理，允许用户手动撤销和授予一个app所申请的权限
+        // 并记录在/data/system/appops.xml
+        // 该服务被广泛用于检查某个app是否具有操作某api
+        mAppOpsService = new AppOpsService(new File(systemDir, "appops.xml"), mHandler);
+        // 打开/data/system/urigrants.xml，管理URI权限（与content provid读写有关）
+        // 更多关于URI权限可以查看：https://developer.android.com/guide/topics/security/permissions.html#uri
+        mGrantFile = new AtomicFile(new File(systemDir, "urigrants.xml"));
+
+        // User 0 is the first and only user that runs at boot.
+         // User 0是第一个，也是唯一的一个开机过程中运行的用户
+        mStartedUsers.put(UserHandle.USER_OWNER, new UserState(UserHandle.OWNER, true));
+        mUserLru.add(UserHandle.USER_OWNER);
+        updateStartedUserArrayLocked();
+
+        // 获取opengl版本
+        GL_ES_VERSION = SystemProperties.getInt("ro.opengles.version",
+            ConfigurationInfo.GL_ES_VERSION_UNDEFINED);
+
+        mTrackingAssociations = "1".equals(SystemProperties.get("debug.track-associations"));
+
+        mConfiguration.setToDefaults();
+        mConfiguration.setLocale(Locale.getDefault());
+
+        mConfigurationSeq = mConfiguration.seq = 1;
+
+        //进程CPU使用情况的追踪器的初始化
+        mProcessCpuTracker.init();
+
+        mCompatModePackages = new CompatModePackages(this, systemDir, mHandler);
+
+        // 创建Intent防火墙
+        // intent过滤安全机制，在使用intent启动activity，service，发送广播的时候都会通过这个机制检查是不是允许执行，只有允许了才能真正执行
+        mIntentFirewall = new IntentFirewall(new IntentFirewallInterface(), mHandler);
+
+        mRecentTasks = new RecentTasks(this);
+
+        // 创建Activity栈的对象
+        // 也就是创建activity的管理对象
+        mStackSupervisor = new ActivityStackSupervisor(this, mRecentTasks);
+        mTaskPersister = new TaskPersister(systemDir, mStackSupervisor, mRecentTasks);
+
+        // 创建统计cpu使用情况的线程
+        mProcessCpuThread = new Thread("CpuTracker") {
+            @Override
+            public void run() {
+                while (true) {
+                    try {
+                        try {
+                            synchronized(this) {
+                                final long now = SystemClock.uptimeMillis();
+                                long nextCpuDelay = (mLastCpuTime.get()+MONITOR_CPU_MAX_TIME)-now;
+                                long nextWriteDelay = (mLastWriteTime+BATTERY_STATS_TIME)-now;
+                                //Slog.i(TAG, "Cpu delay=" + nextCpuDelay
+                                //        + ", write delay=" + nextWriteDelay);
+                                if (nextWriteDelay < nextCpuDelay) {
+                                    nextCpuDelay = nextWriteDelay;
+                                }
+                                if (nextCpuDelay > 0) {
+                                    mProcessCpuMutexFree.set(true);
+                                    this.wait(nextCpuDelay);
+                                }
+                            }
+                        } catch (InterruptedException e) {
+                        }
+                        updateCpuStatsNow();
+                    } catch (Exception e) {
+                        Slog.e(TAG, "Unexpected exception collecting process stats", e);
+                    }
+                }
+            }
+        };
+
+        // 把服务添加到Watchdog的监控中
+        Watchdog.getInstance().addMonitor(this);
+        Watchdog.getInstance().addThread(mHandler);
+    }
+```
+
+从构造函数代码中可以看出除了主线程外，又另外创建了三个线程，一个是以TAG命令的用于AMS Handler消息处理的线程；一个是名为android.ui的线程，处理ui handler；最后一个是CpuTracker线程，用于统计cpu使用请看。
+
+除了创建线程外，AMS主要还创建了四大组件Activity,Service，Broadcast和ContentProvider的管理对象以及一些内部对象。AMS中的SparseArray<ProcessRecord> mPidsSelfLocked负责记录所有运行的进程。
+
+
+在来看看AMS的start()方法：
+
+```java
+private void start() {
+
+      // 移除所有的进程组
+      Process.removeAllProcessGroups();
+      //启动CpuTracker线程
+      mProcessCpuThread.start();
+      //将电池统计服务注册SM中
+      mBatteryStatsService.publish(mContext);
+      // 将AppOpsService注册到SM中，这个服务是提供android app 权限的撤销和授予
+      mAppOpsService.publish(mContext);
+      Slog.d("AppOps", "AppOpsService published");
+       //创建LocalService，并添加到LocalServices
+      LocalServices.addService(ActivityManagerInternal.class, new LocalService());
+  }
+
+```
+start()方法中要注意这里创建了一个只有在本进程可以使用的一个service：LocalService，并且添加到LocalServices中。
+
+### setSystemProcess方法
+
+systemServer在启动AMS之后，紧接着调用AMS的setSystemProcess()方法。
+
+```java
+    public void setSystemProcess() {
+        try {
+            // 将AMS加入到SM中，名字是"activity"
+            ServiceManager.addService(Context.ACTIVITY_SERVICE, this, true);
+            // 向SM中注册名为"procstats"的服务，用来dump，也就是获取进程状态信息，例如最近运行的时间等
+            ServiceManager.addService(ProcessStats.SERVICE_NAME, mProcessStats);
+            // 向SM中注册名为“meminfo”的服务，用来dump,也就是获取进程内存使用状态
+            ServiceManager.addService("meminfo", new MemBinder(this));
+            // 向SM中注册名为"gfxinfo"的服务，用来dump,也就是获取每个进程使用图形加速卡状态
+            ServiceManager.addService("gfxinfo", new GraphicsBinder(this));
+            // 向SM中注册名为"dbinfo"的服务，用来dump.也就是获取进程的数据库信息
+            ServiceManager.addService("dbinfo", new DbBinder(this));
+            // 向SM中注册名为"cpuinfo"的服务，用来dump，也就是获取获取进程CPU信息
+            if (MONITOR_CPU_USAGE) {
+                ServiceManager.addService("cpuinfo", new CpuBinder(this));
+            }
+            // 向SM注册名为“permission”的服务，用来检查调用权限
+            ServiceManager.addService("permission", new PermissionController(this));
+            // 向SM注册名为“processinfo”的服务，用来获取该进程的状态。例如是否是后台进程
+            ServiceManager.addService("processinfo", new ProcessInfoService(this));
+
+            // 获取名为"android"的app的ApplicationInfo
+            // 实际上就是framework-res.apk
+            ApplicationInfo info = mContext.getPackageManager().getApplicationInfo(
+                    "android", STOCK_PM_FLAGS);
+
+            // 实际上就是为创建LoadedApk对象
+            mSystemThread.installSystemApplicationInfo(info, getClass().getClassLoader());
+
+            // 实际上systemSever可以当做是framework-res.apk的应用进程，这里把其也加入到AMS的进程管理体系中
+            synchronized (this) {
+                ProcessRecord app = newProcessRecordLocked(info, info.processName, false, 0);
+                app.persistent = true;
+                // MY_PID为SystemServer的pid
+                app.pid = MY_PID;
+                app.maxAdj = ProcessList.SYSTEM_ADJ;
+                app.makeActive(mSystemThread.getApplicationThread(), mProcessStats);
+                synchronized (mPidsSelfLocked) {
+                  //mPidsSelfLocked负责记录所有运行的进程
+                    mPidsSelfLocked.put(app.pid, app);
+                }
+                updateLruProcessLocked(app, false, null);
+                updateOomAdjLocked();
+            }
+        } catch (PackageManager.NameNotFoundException e) {
+            throw new RuntimeException(
+                    "Unable to find android system package", e);
+        }
+    }
+```
+
+setSystemProcess方法主要是向SM注册了一些服务，并且把SystemServer与framewo-res.apk关联，加入到AMS的进程管理体系中。
+
+setSystemProcess方法注册的服务，其实都是对AMS的二次封装,以processinfo为例
+
+```java
+static class ProcessInfoService extends IProcessInfoService.Stub {
+    final ActivityManagerService mActivityManagerService;
+    // 传入的就是AMS
+    ProcessInfoService(ActivityManagerService activityManagerService) {
+        mActivityManagerService = activityManagerService;
+    }
+
+    @Override
+    public void getProcessStatesFromPids(/*in*/ int[] pids, /*out*/ int[] states) {
+        mActivityManagerService.getProcessStatesForPIDs(/*in*/ pids, /*out*/ states);
+    }
+}
+```
+从getProcessStatesFromPids方法可以看出，该方法实际上调用AMS的getProcessStatesForPIDs()方法。其他服务亦是如此。
+
+
+### systemReady()方法
+
+systemServer的startOtherServices()方法中会调用AMS的systemReady()方法，这个方法是android系统进入用户交互阶段前最后进行的准备工作。
+
+```java
+public void systemReady(final Runnable goingCallback) {
+    synchronized(this) {
+        if (mSystemReady) {
+            // If we're done calling all the receivers, run the next "boot phase" passed in
+            // by the SystemServer
+            if (goingCallback != null) {
+                goingCallback.run();
+            }
+            return;
+        }
+...........
+```
+这个方法中的全部代码都是处在保护区中的，也就是说必须保证线程间安全，刚开始我们的mSystemReady是false，所以这里的代码不会执行.继续：
+
+```java
+mLocalDeviceIdleController
+                   = LocalServices.getService(DeviceIdleController.LocalService.class);
+```
+这里是获得设备idle控制器，主要用于广播发送中的控制，后面我们分析广播机制的时候会提到这个内容。继续：
+
+```java
+// Make sure we have the current profile info, since it is needed for
+          // security checks.
+          updateCurrentProfileIdsLocked();
+```
+这部分代码是十分重要的，这里就是装载系统的用户ID的profile，用于后面的权限检查，这个是比较重要的信息，尤其是在android多用户的情况下，根据用户的ID配置赋予不同的权限。后面会分析Android的多用户系统机制，到时候再说吧。
+
+```java
+mRecentTasks.clear();
+            mRecentTasks.addAll(mTaskPersister.restoreTasksLocked());
+            mRecentTasks.cleanupLocked(UserHandle.USER_ALL);
+            mTaskPersister.startPersisting();
+```
+这里是在android 5.0之后才有的部分，这部分的主要工作就是重建带有persistent标记的task。在android 5.0中支持带有persistent标记的task，这些task在系统关机的时候，系统会把它的信息保存在系统的/data/system/recent_tasks目录下的xml文件中，系统重启的时候通过这些文件会重新创建task。
+
+如下所示是N5手机运行6.0系统中该文件夹中的内容：
+```shell
+root@hammerhead:/data/system/recent_tasks # ls -l
+-rw------- system   system        873 2016-07-05 11:25 27_task.xml
+-rw------- system   system        831 2016-07-04 10:52 28_task.xml
+-rw------- system   system        815 2016-07-04 10:53 34_task.xml
+-rw------- system   system        827 2016-07-05 10:32 35_task.xml
+```
+27_task.xml内容：
+```xml
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<task task_id="27" real_activity="com.android.settings/.Settings" orig_activity="com.android.settings/.Settings" affinity="com.android.settings" root_has_reset="true" auto_remove_recents="false" asked_compat_mode="false" user_id="0" effective_uid="1000" task_type="0" first_active_time="1467623530247" last_active_time="1467717943311" last_time_moved="1467714888309" never_relinquish_identity="true" task_description_color="ff263238" task_affiliation_color="-14273992" task_affiliation="27" prev_affiliation="-1" next_affiliation="-1" calling_uid="10008" calling_package="com.android.launcher3" resizeable="false" privileged="true">
+<intent action="android.intent.action.MAIN" component="com.android.settings/.Settings" flags="10200000">
+<categories category="android.intent.category.LAUNCHER" />
+</intent>
+</task>
+
+```
+
+我想到这样一个场景应该是依赖与此实现的。就是Android的任务栏中显示的最近打开的应用，当你重启手机之后，再次查看任务栏中仍然可以显示你之前重启手机之前运行运行过的app。而且当你把app从任务栏中移除的话，对应的文件也就删除了。当然当手动删除的话，重启手机，任务栏中不会在显示这个app.
+
+继续：
+
+```java
+// Check to see if there are any update receivers to run.
+         if (!mDidUpdate) {//检查是否处于更新状态
+             if (mWaitingUpdate) {
+                 return;// 是的话，直接返回
+             }
+             final ArrayList<ComponentName> doneReceivers = new ArrayList<ComponentName>();
+             mWaitingUpdate = deliverPreBootCompleted(new Runnable() {
+                 public void run() {
+                     synchronized (ActivityManagerService.this) {
+                         mDidUpdate = true;
+                     }
+                     showBootMessage(mContext.getText(
+                             R.string.android_upgrading_complete),
+                             false);
+                     writeLastDonePreBootReceivers(doneReceivers);
+                     systemReady(goingCallback);
+                 }
+             }, doneReceivers, UserHandle.USER_OWNER);
+
+             if (mWaitingUpdate) {
+                 return;
+             }
+             mDidUpdate = true;
+         }
+
+         mAppOpsService.systemReady();
+         mSystemReady = true;
+     }
+................
+```
+这里的代码就是用来处理android系统升级过程的，android系统升级的时候，系统的模块或者自带app也是需要开机的时候完成一些更新，例如重新整理数据等操作。这里我们调用了deliverPreBootCompleted方法发送了一个ACTION_PRE_BOOT_COMPLETED的消息通知这些模块。需要注意的是，这个消息只会发送给系统级别的app，并不会发送给第三方的app，具体的接受模块定义在/data/system/called_pre_boots.dat文件中.
+
+继续：
+
+```java
+ArrayList<ProcessRecord> procsToKill = null;
+      synchronized(mPidsSelfLocked) {
+          for (int i=mPidsSelfLocked.size()-1; i>=0; i--) {
+              ProcessRecord proc = mPidsSelfLocked.valueAt(i);
+              // 检查进程是否有persistent标志
+              if (!isAllowedWhileBooting(proc.info)){
+                  if (procsToKill == null) {
+                      procsToKill = new ArrayList<ProcessRecord>();
+                  }
+                  procsToKill.add(proc);
+              }
+          }
+      }
+
+      synchronized(this) {
+          if (procsToKill != null) {
+              for (int i=procsToKill.size()-1; i>=0; i--) {
+                  ProcessRecord proc = procsToKill.get(i);
+                  Slog.i(TAG, "Removing system update proc: " + proc);
+                  removeProcessLocked(proc, true, false, "system update done");
+              }
+          }
+
+          // Now that we have cleaned up any update processes, we
+          // are ready to start launching real processes and know that
+          // we won't trample on them any more.
+          mProcessesReady = true;
+      }
+```
+这段代码的作用就是找到已经启动的应用进程，然后杀死他们，为什么呢？目的就是为了在home启动之前准备一个干净的环境。home启动之前的环境怎么会不干净呢？我们之前提到了，android系统会发送一个intent消息给系统模块，通知他们进行相应的升级，这里的这些模块就是有可能会在home运行之前运行的，为了不让这些模块的运行干扰我们home的正常逻辑，所以要就杀死他们。但是这里我们看到代码中定义了有一种进程是不会被杀死的，就是isAllowedWhileBooting返回true的进程，这个方法会检查进程是否带有FLAG_PERSISTENT标记，如果有的话就不用杀死他们，因为带有这个标识的进程下面我们还有启动他们的。
+
+继续：
+
+```java
+synchronized(this) {
+            // Make sure we have no pre-ready processes sitting around.
+
+            // 处于工厂模式，则查找测试程序
+            if (mFactoryTest == FactoryTest.FACTORY_TEST_LOW_LEVEL) {
+                ResolveInfo ri = mContext.getPackageManager()
+                        .resolveActivity(new Intent(Intent.ACTION_FACTORY_TEST),
+                                STOCK_PM_FLAGS);
+                CharSequence errorMsg = null;
+                if (ri != null) {
+                    ActivityInfo ai = ri.activityInfo;
+                    ApplicationInfo app = ai.applicationInfo;
+                    // 判断找到的测试程序是否是系统应用
+                    if ((app.flags&ApplicationInfo.FLAG_SYSTEM) != 0) {
+                        mTopAction = Intent.ACTION_FACTORY_TEST;
+                        mTopData = null;
+                        // 把测试程序的信息设置下面的变量中，将会启动测试程序
+                        mTopComponent = new ComponentName(app.packageName,
+                                ai.name);
+                    } else {
+                        errorMsg = mContext.getResources().getText(
+                                com.android.internal.R.string.factorytest_not_system);
+                    }
+                } else {
+                    errorMsg = mContext.getResources().getText(
+                            com.android.internal.R.string.factorytest_no_action);
+                }
+                if (errorMsg != null) {
+                    mTopAction = null;
+                    mTopData = null;
+                    mTopComponent = null;
+                    Message msg = Message.obtain();
+                    msg.what = SHOW_FACTORY_ERROR_MSG;
+                    msg.getData().putCharSequence("msg", errorMsg);
+                    mUiHandler.sendMessage(msg);
+                }
+            }
+        }
+
+```
+
+这是判断如果当前系统处于“工厂测试模式”的话，就会启动用于工厂测试的模块。我们的手机在生产出厂的时候，都要进行工厂测试的，在工厂模式下运行的程序需要响应intent ACTION_FACTORY_TEST消息。这里主要就是查找响应该消息的程序，并且放在mTopComponent中，如果没有找到，就发送工场测试失败的消息。
+
+```java
+
+        retrieveSettings();
+        loadResourcesOnSystemReady();
+```
+retrieveSettings方法来读取设置，这个方法读取了4中设置：
+
+EBUG_APP：需要调试的app名称
+
+WAIT_FOR_DEBUGGER:如果值为1，表示启动调试的app时需要先等待调试器，否则正常启动
+
+ALWAYS_FINISH_ACTIVITIES:值为1的时候，表示activity已经不再需要，系统需要立即清理他们，这个可以在setting的开发者选项中设置。
+
+DEVELOPMENT_FORCE_RTL：值为1表示要将系统设置为从右到左的模式（西亚地区部分语言，如希伯来语）。
+
+接着systemReady的分析，在上面的方法之后调用了loadResourcesOnSystemReady方法从资源文件中读取了几个缺省的系统配置信息。
+
+继续：
+
+```java
+synchronized (this) {
+            readGrantedUriPermissionsLocked();
+        }
+
+```
+读取前面的打开的URI权限的配置文件/data/system/urigrants.xml。
+
+继续：
+
+```java
+   if (goingCallback != null) goingCallback.run();
+```
+调用SystemServer代码中定义的Runnable对象中的run方法。
+
+```java
+        mBatteryStatsService.noteEvent(BatteryStats.HistoryItem.EVENT_USER_RUNNING_START,
+                Integer.toString(mCurrentUserId), mCurrentUserId);
+        mBatteryStatsService.noteEvent(BatteryStats.HistoryItem.EVENT_USER_FOREGROUND_START,
+                Integer.toString(mCurrentUserId), mCurrentUserId);
+        // 启动当前用户
+        mSystemServiceManager.startUser(mCurrentUserId);
+```
+这里通知BatteryStatsService当前用户启动消息，BatteryStatsService会开始电池数据的统计分析。启动当前用户，为用户和系统交互做launcher启动前的准备。
+
+继续：
+
+```java
+synchronized (this) {
+            // 如果不在工厂模式
+            if (mFactoryTest != FactoryTest.FACTORY_TEST_LOW_LEVEL) {
+                try {
+                  // 查找系统中带有FLAG_PERSISTENT标志的应用
+                    List apps = AppGlobals.getPackageManager().
+                        getPersistentApplications(STOCK_PM_FLAGS);
+                    if (apps != null) {
+                        int N = apps.size();
+                        int i;
+                        for (i=0; i<N; i++) {
+                            ApplicationInfo info
+                                = (ApplicationInfo)apps.get(i);
+                                // 排除掉包名为"android"的应用，因为前面已经加入了
+                            if (info != null &&
+                                    !info.packageName.equals("android")) {
+                                addAppLocked(info, false, null /* ABI override */);
+                            }
+                        }
+                    }
+                } catch (RemoteException ex) {
+                    // pm is in same process, this will never happen.
+                }
+            }
+
+            // Start up initial activity.
+            // 启动结束的标志
+            mBooting = true;
+            // 启动launcher桌面
+            startHomeActivityLocked(mCurrentUserId, "systemReady");
+
+            try {
+                if (AppGlobals.getPackageManager().hasSystemUidErrors()) {
+                    Slog.e(TAG, "UIDs on the system are inconsistent, you need to wipe your"
+                            + " data partition or your device will be unstable.");
+                    mUiHandler.obtainMessage(SHOW_UID_ERROR_MSG).sendToTarget();
+                }
+            } catch (RemoteException e) {
+            }
+
+            if (!Build.isBuildConsistent()) {
+                Slog.e(TAG, "Build fingerprint is not consistent, warning user");
+                mUiHandler.obtainMessage(SHOW_FINGERPRINT_ERROR_MSG).sendToTarget();
+            }
+
+            long ident = Binder.clearCallingIdentity();
+            try {
+                Intent intent = new Intent(Intent.ACTION_USER_STARTED);
+                intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY
+                        | Intent.FLAG_RECEIVER_FOREGROUND);
+                intent.putExtra(Intent.EXTRA_USER_HANDLE, mCurrentUserId);
+                broadcastIntentLocked(null, null, intent,
+                        null, null, 0, null, null, null, AppOpsManager.OP_NONE,
+                        null, false, false, MY_PID, Process.SYSTEM_UID, mCurrentUserId);
+                intent = new Intent(Intent.ACTION_USER_STARTING);
+                intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY);
+                intent.putExtra(Intent.EXTRA_USER_HANDLE, mCurrentUserId);
+                broadcastIntentLocked(null, null, intent,
+                        null, new IIntentReceiver.Stub() {
+                            @Override
+                            public void performReceive(Intent intent, int resultCode, String data,
+                                    Bundle extras, boolean ordered, boolean sticky, int sendingUser)
+                                    throws RemoteException {
+                            }
+                        }, 0, null, null,
+                        new String[] {INTERACT_ACROSS_USERS}, AppOpsManager.OP_NONE,
+                        null, true, false, MY_PID, Process.SYSTEM_UID, UserHandle.USER_ALL);
+            } catch (Throwable t) {
+                Slog.wtf(TAG, "Failed sending first user broadcasts", t);
+            } finally {
+                Binder.restoreCallingIdentity(ident);
+            }
+             // 开始恢复显示activity栈顶的界面，也就是launcher的主界面。
+            mStackSupervisor.resumeTopActivitiesLocked();
+            sendUserSwitchBroadcastsLocked(-1, mCurrentUserId);
+        }
+    }
+
+```
+这段代码的作用就是启动带有FLAG_PERSISTENT标记的app，启动应用通过调用addAppLocked方法完成，这个方法后面我们分析AMS的进程管理的时候再详细描述。接着就是启动我们熟悉的launcher了，通过调用startHomeActivityLocked方法完成，这个方法会首先查找当前launcher启动器，然后再启动对应的启动器（因为用户可能会下载安装了第三方的启动器）。hlauncher启动完成之后，系统会发送ACTION_BOOT_COMPLETE消息，通知app系统启动完成。

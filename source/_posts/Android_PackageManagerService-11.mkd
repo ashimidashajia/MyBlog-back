@@ -1,0 +1,194 @@
+---
+layout: post
+title: Android-6.0之PMS的守护进程installd
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-06-30 14:12:55
+---
+
+有一个名为installd的native 守护进程一直默默的为PMS服务。现在就来看看它究竟在做什么。
+
+<!--more-->
+
+installd定义在init.rc中：
+
+```shell
+
+service installd /system/bin/installd
+    class main
+    socket installd stream 600 system system
+```
+installd架构相对比较简单，会监听一个本地的socket，这个socket通过在init.rc文件中指定服务属性的方式创建，创建的本地socket位于：
+
+```shell
+/dev/socket/installd
+```
+源码位置：
+```shell
+ Android-6/frameworks/native/cmds/installd/Installd.cpp
+```
+
+### 入口点
+
+自然就是main函数了：
+
+```c++
+
+int main(const int argc unused, char ×argv[]) {
+    ...................
+
+    // 初始化全局变量
+    if (initialize_globals() < 0) {
+        ALOGE("Could not initialize globals; exiting.\n");
+        exit(1);
+    }
+    // 初始化系统目录
+    if (initialize_directories() < 0) {
+        ALOGE("Could not create directories; exiting.\n");
+        exit(1);
+    }
+
+    if (selinux_enabled && selinux_status_open(true) < 0) {
+        ALOGE("Could not open selinux status; exiting.\n");
+        exit(1);
+    }
+    // 从环境变量ANDROID_SOCKET_installd中获取用于监听的本地socket
+    lsocket = android_get_control_socket(SOCKET_PATH);
+    if (lsocket < 0) {
+        ALOGE("Failed to get socket from environment: %s\n", strerror(errno));
+        exit(1);
+    }
+    // 监听socket
+    if (listen(lsocket, 5)) {
+        ALOGE("Listen on socket failed: %s\n", strerror(errno));
+        exit(1);
+    }
+    fcntl(lsocket, F_SETFD, FD_CLOEXEC);
+
+    for (;;) {
+        alen = sizeof(addr);
+        // 接收连接
+        s = accept(lsocket, &addr, &alen);
+        if (s < 0) {
+            ALOGE("Accept failed: %s\n", strerror(errno));
+            continue;
+        }
+        fcntl(s, F_SETFD, FD_CLOEXEC);
+
+        // 立即处理新的连接，这说明install一次只能处理一个请求
+        ALOGI("new connection\n");
+        for (;;) {
+            unsigned short count;
+            // 读取命令长度
+            if (readx(s, &count, sizeof(count))) {
+                ALOGE("failed to read size\n");
+                break;
+            }
+            // 如果命令长度错误则停止处理
+            if ((count < 1) || (count >= BUFFER_MAX)) {
+                ALOGE("invalid size %d\n", count);
+                break;
+            }
+            // 读取命令
+            if (readx(s, buf, count)) {
+                ALOGE("failed to read command\n");
+                break;
+            }
+            buf[count] = 0;
+            if (selinux_enabled && selinux_status_updated() > 0) {
+                selinux_android_seapp_context_reload();
+            }
+            // 执行命令
+            if (execute(s, buf)) break;
+        }
+        ALOGI("closing connection\n");
+        close(s);
+    }
+
+    return 0;
+}
+```
+
+通过代码中的注释，已经可以大体知道他的工作流程了。
+
+initialize_globals()是用来初始化全局变量的，当该方法执行完毕的时候，可以确定以下的全局变量的值：
+
+```c++
+dir_rec_t android_data_dir; // /data
+dir_rec_t android_asec_dir; // /mnt/asec
+dir_rec_t android_app_dir; // /data/app
+dir_rec_t android_app_private_dir; // /data/priv-app
+dir_rec_t android_app_lib_dir; // /data/app-lib
+dir_rec_t android_media_dir;// /data/media
+dir_rec_t android_mnt_expand_dir; // /mnt/expand
+
+// android_system_dirs.count = 4;
+//  /system/app  
+//  /system/priv-app
+// /vendor/app
+// /oem/app
+
+dir_rec_array_t android_system_dirs;// /
+```
+initialize_directories()负责保证上面的文件夹都被创建了，以及设置了正确的权限。
+
+### installd支持的命令
+
+支持如下命令：
+
+```c++
+struct cmdinfo cmds[] = {
+    { "ping",                 0, do_ping }, // 用于测试的空操作
+    { "install",              5, do_install }, // 安装应用
+    { "dexopt",               9, do_dexopt }, //将dex转换为oat或者patchoat oat文件
+    { "markbootcomplete",     1, do_mark_boot_complete },
+    { "movedex",              3, do_move_dex },  //把apk文件从一个目录移动到另一个目录
+    { "rmdex",                2, do_rm_dex }, // 删除apk文件
+    { "remove",               3, do_remove }, // 卸载应用
+    { "rename",               2, do_rename }, // 更改应用数据目录的名称
+    { "fixuid",               4, do_fixuid }, // 更改应用数据目录的uid
+    { "freecache",            2, do_free_cache }, // 清除/cache目录下的文件
+    { "rmcache",              3, do_rm_cache }, // 删除/cache下某个应用的目录
+    { "rmcodecache",          3, do_rm_code_cache }, // 删除数据目录中code_cache文件夹
+    { "getsize",              8, do_get_size }, // 计算一个应用占用的空间大小，包括apk大小，数据目录，cache目录等
+    { "rmuserdata",           3, do_rm_user_data },// 删除一个用户中某个app的应用数据
+    { "cpcompleteapp",        6, do_cp_complete_app },
+    { "movefiles",            0, do_movefiles },//执行/system/etc/updatecmds/中的脚本
+    { "linklib",              4, do_linklib }, // 建立 jib连接
+    { "mkuserdata",           5, do_mk_user_data },// 为某个用户创建应用数据目录
+    { "mkuserconfig",         1, do_mk_user_config },// 创建/data/misc/user/userid/
+    { "rmuser",               2, do_rm_user },// 删除一个user的所有文件
+    { "idmap",                3, do_idmap },
+    { "restorecondata",       4, do_restorecon_data },// 恢复目录的SEAndroid安全上下文
+    { "createoatdir",         2, do_create_oat_dir }, // 创建 /data/app/包名/oat/<inst>文件夹
+    { "rmpackagedir",         1, do_rm_package_dir },// 删除/data/app/包名
+    { "linkfile",             3, do_link_file } // 创建软连接
+};
+```
+其中do_install所做的安装工作，实际上就是创建应用数据目录，这里分为用户id为0和不为0两种情况。（应用安装在内部存储）
+
+当用户ID为0：
+
+```shell
+/data/data/包名/
+```
+
+用户ID不为0：
+
+```shell
+/data/user/userid/包名
+```
+
+用户安装在外部存储时就一种情况：
+
+```shell
+/mnt/expand/volume_uuid/user/userid/包名
+```
+
+创建完文件夹之后，就修改权限为0751，然后SEAndroid上下文，以及uid和gid。
+
+另外do_dexopt中既可以执行dex2oat命令，将dex转换为oat文件，也可以执行patchoat，为oat文件随机化内存加载地址。
+
+还要了解的的是installd命令的格式：
+
+先发命令长度，然后再发命令。

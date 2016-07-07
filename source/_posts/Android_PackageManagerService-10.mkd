@@ -1,0 +1,294 @@
+---
+layout: post
+title: Android-6.0之PMS卸载APK
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-06-29 16:03:42
+---
+
+前面详细介绍了如何安装一个apk，现在分析PMS卸载APK的过程。
+
+<!--more-->
+
+卸载一个app,要指明卸载哪个用户中的该app。卸载的过程无非就是删除沙箱目录，删除/data/app/包名,以及删除其在PMS中的相关信息，比如从PMS中去除与该app相关的组件信息等。另外也要在清除其在相关配置文件中记录，如packages.xml。
+
+
+PMS卸载一个app的api是名为deletePackageAsUser的方法，刚好和installPackageAsUser()安装apk的方法相对应。
+
+```java
+ public void deletePackageAsUser(String packageName, IPackageDeleteObserver observer, int userId,
+            int flags) {
+        deletePackage(packageName, new LegacyPackageDeleteObserver(observer).getBinder(), userId,
+                flags);
+    }
+
+    public void deletePackage(final String packageName,
+            final IPackageDeleteObserver2 observer, final int userId, final int flags) {
+
+        // 同样要检查权限，看是否有权限卸载
+        // 主要检查卸载发起者进程是是否有权限卸载
+        // 当前用户是否有权限卸载
+        // 以及卸载的是全部用户还是当前用户
+        mContext.enforceCallingOrSelfPermission(
+                android.Manifest.permission.DELETE_PACKAGES, null);
+        Preconditions.checkNotNull(packageName);
+        Preconditions.checkNotNull(observer);
+        final int uid = Binder.getCallingUid();
+        if (UserHandle.getUserId(uid) != userId) {
+            mContext.enforceCallingPermission(
+                    android.Manifest.permission.INTERACT_ACROSS_USERS_FULL,
+                    "deletePackage for user " + userId);
+        }
+        if (isUserRestricted(userId, UserManager.DISALLOW_UNINSTALL_APPS)) {
+            try {
+                observer.onPackageDeleted(packageName,
+                        PackageManager.DELETE_FAILED_USER_RESTRICTED, null);
+            } catch (RemoteException re) {
+            }
+            return;
+        }
+................................................
+// 在消息处理方法中执行卸载应用的操作
+        mHandler.post(new Runnable() {
+            public void run() {
+                mHandler.removeCallbacks(this);
+                // 调用这个方法进行实际的卸载的操作
+                final int returnCode = deletePackageX(packageName, userId, flags);
+                if (observer != null) {
+                    try {
+                      // 发送卸载应用的结果
+                        observer.onPackageDeleted(packageName, returnCode, null);
+                    } catch (RemoteException e) {
+                        Log.i(TAG, "Observer no longer exists.");
+                    } //end catch
+                } //end if
+            } //end run
+        });
+    }
+
+```
+deletePackageAsUser()方法检查调用者权限之后，post了一个消息。在消息的处理方法中继续执行卸载操作，这样就避免了Binder调用时间过长。实际的卸载过程又是通过deletePackageX()方法来完成的。
+
+```java
+
+    private int deletePackageX(String packageName, int userId, int flags) {
+        final PackageRemovedInfo info = new PackageRemovedInfo();
+        final boolean res;
+
+        // 卸载哪个用户下的该app
+        final UserHandle removeForUser = (flags & PackageManager.DELETE_ALL_USERS) != 0
+                ? UserHandle.ALL : new UserHandle(userId);
+
+        // 检查userid代表的用户是否由权限卸载这个应用
+        if (isPackageDeviceAdmin(packageName, removeForUser.getIdentifier())) {
+            Slog.w(TAG, "Not removing package " + packageName + ": has active device admin");
+            return PackageManager.DELETE_FAILED_DEVICE_POLICY_MANAGER;
+        }
+
+        // 是否为所有用户都卸载这个应用
+        boolean removedForAllUsers = false;
+        boolean systemUpdate = false;
+
+        // for the uninstall-updates case and restricted profiles, remember the per-
+        // userhandle installed state
+        int[] allUsers;
+        boolean[] perUserInstalled;
+        synchronized (mPackages) {
+          // 获取应用在mSettings中记录的信息
+            PackageSetting ps = mSettings.mPackages.get(packageName);
+            // 获取当前哪些用户安装了该app
+            allUsers = sUserManager.getUserIds();
+            perUserInstalled = new boolean[allUsers.length];
+            for (int i = 0; i < allUsers.length; i++) {
+                perUserInstalled[i] = ps != null ? ps.getInstalled(allUsers[i]) : false;
+            }
+        }
+
+        synchronized (mInstallLock) {
+            if (DEBUG_REMOVE) Slog.d(TAG, "deletePackageX: pkg=" + packageName + " user=" + userId);
+            // 调用这个方法进行卸载操作
+            res = deletePackageLI(packageName, removeForUser,
+                    true, allUsers, perUserInstalled,
+                    flags | REMOVE_CHATTY, info, true);
+            systemUpdate = info.isRemovedPackageSystemUpdate;
+            if (res && !systemUpdate && mPackages.get(packageName) == null) {
+                removedForAllUsers = true;
+            }
+            if (DEBUG_REMOVE) Slog.d(TAG, "delete res: systemUpdat                                      e=" + systemUpdate
+                    + " removedForAllUsers=" + removedForAllUsers);
+        }
+
+        if (res) {
+            info.sendBroadcast(true, systemUpdate, removedForAllUsers);
+
+          //如果卸载的应用是某个系统应用的升级包，卸载它，将导致低版本的系统应用重新使用，因此发送下面的广播通知这种变化。
+            if (systemUpdate) {
+                Bundle extras = new Bundle(1);
+                extras.putInt(Intent.EXTRA_UID, info.removedAppId >= 0
+                        ? info.removedAppId : info.uid);
+                extras.putBoolean(Intent.EXTRA_REPLACING, true);
+
+                sendPackageBroadcast(Intent.ACTION_PACKAGE_ADDED, packageName,
+                        extras, null, null, null);
+                sendPackageBroadcast(Intent.ACTION_PACKAGE_REPLACED, packageName,
+                        extras, null, null, null);
+                sendPackageBroadcast(Intent.ACTION_MY_PACKAGE_REPLACED, null,
+                        null, packageName, null, null);
+            }
+        }
+        // Force a gc here.
+        Runtime.getRuntime().gc();
+        // Delete the resources here after sending the broadcast to let
+        // other processes clean up before deleting resources.
+        if (info.args != null) {
+            synchronized (mInstallLock) {
+              // 调用FileInstallArgs中的该方法进行清理工作
+              // 保证/data/app/包名中的文件都被删除了
+                info.args.doPostDeleteLI(true);
+            }
+        }
+
+        return res ? PackageManager.DELETE_SUCCEEDED : PackageManager.DELETE_FAILED_INTERNAL_ERROR;
+    }
+
+```
+deletePackageX()方法手机了应用在不同用户下的安装情况后，调用deletePackageLI()方法继续执行卸载删除工作。如果卸载的是某个系统应用的升级包，还要广播通知以前的低版本系统应用可以再次被使用了。
+
+
+deletePackageLI方法参数：
+
+1. 要卸载的apk的包名
+
+2. 卸载哪个用户中的该apk
+
+3. 是否删除code和Resources
+
+4. 当前所有用户
+
+5. 当前所有用户中该app的安装状态
+
+6. flags
+
+7. PackageRemovedInfo
+
+8. 是否修改packages.xml
+
+```java
+
+    /*
+     * This method handles package deletion in general
+     */
+    private boolean deletePackageLI(String packageName, UserHandle user,
+            boolean deleteCodeAndResources, int[] allUserHandles, boolean[] perUserInstalled,
+            int flags, PackageRemovedInfo outInfo,
+            boolean writeSettings) {
+        if (packageName == null) {
+            Slog.w(TAG, "Attempt to delete null packageName.");
+            return false;
+        }
+        if (DEBUG_REMOVE) Slog.d(TAG, "deletePackageLI: " + packageName + " user " + user);
+        PackageSetting ps;
+        boolean dataOnly = false;
+        int removeUser = -1;
+        int appId = -1;
+        synchronized (mPackages) {
+            ps = mSettings.mPackages.get(packageName);
+            if (ps == null) {
+                Slog.w(TAG, "Package named '" + packageName + "' doesn't exist.");
+                return false;
+            }
+            if ((!isSystemApp(ps) || (flags&PackageManager.DELETE_SYSTEM_APP) != 0) && user != null
+                    && user.getIdentifier() != UserHandle.USER_ALL) {
+
+                // 设置要卸载的该app的用户状态，修改该app在该用户中的相关信息，标记为卸载，另外要删除在该用户中的沙箱中的数据
+                if (DEBUG_REMOVE) Slog.d(TAG, "Only deleting for single user");
+                final int userId = user.getIdentifier();
+                ps.setUserState(userId,
+                        COMPONENT_ENABLED_STATE_DEFAULT,
+                        false, //installed
+                        true,  //stopped
+                        true,  //notLaunched
+                        false, //hidden
+                        null, null, null,
+                        false, // blockUninstall
+                        ps.readUserState(userId).domainVerificationStatus, 0);
+                if (!isSystemApp(ps)) {
+                  // 该app被其他用户也安装了，那么就不能删除该app在/data/app/下面的东西了
+                  // 只能删除对应用用户自己的沙箱目录
+                    if (ps.isAnyInstalled(sUserManager.getUserIds())) {
+                        if (DEBUG_REMOVE) Slog.d(TAG, "Still installed by other users");
+                        removeUser = user.getIdentifier();
+                        appId = ps.appId;
+                        // 修改/data/users/<userid>/package-restrictions.xml
+                        // 将上述信息记录其中
+                        scheduleWritePackageRestrictionsLocked(removeUser);
+                    } else {
+                      //只有一个用户安装的时候，要设置其userState中的installed为true
+                      // 前面将其设置为了false
+                        if (DEBUG_REMOVE) Slog.d(TAG, "Not installed by other users, full delete");
+                        ps.setInstalled(true, user.getIdentifier());
+                    }
+                } else {
+                    if (DEBUG_REMOVE) Slog.d(TAG, "Deleting system app");
+                    removeUser = user.getIdentifier();
+                    appId = ps.appId;
+                    scheduleWritePackageRestrictionsLocked(removeUser);
+                }
+            }
+        }
+
+        // 紧紧处理的是一个用户
+        // 因为 USER_ALL = -1
+        if (removeUser >= 0) {
+            // From above, we determined that we are deleting this only
+            // for a single user.  Continue the work here.
+            if (DEBUG_REMOVE) Slog.d(TAG, "Updating install state for user: " + removeUser);
+            if (outInfo != null) {
+                outInfo.removedPackage = packageName;
+                outInfo.removedAppId = appId;
+                outInfo.removedUsers = new int[] {removeUser};
+            }
+            // 删除该用户中的该app的沙箱目录
+            mInstaller.clearUserData(ps.volumeUuid, packageName, removeUser);
+            removeKeystoreDataIfNeeded(removeUser, appId);
+            // 发送START_CLEANING_PACKAGE消息
+            // 处理该消息时调用startCleaningPackages()
+            // 该方法中会发送“android.content.pm.CLEAN_EXTERNAL_STORAGE”的intent
+            // com.android.defcontainer.DefaultContainerService会处理它
+            schedulePackageCleaning(packageName, removeUser, false);
+            synchronized (mPackages) {
+
+                if (clearPackagePreferredActivitiesLPw(packageName, removeUser)) {
+                    //处理UserHandle.USER_ALL这个情况
+                    scheduleWritePackageRestrictionsLocked(removeUser);
+                }
+                resetUserChangesToRuntimePermissionsAndFlagsLPw(ps, removeUser);
+            }
+            return true;
+        }
+
+        ..............................
+        // 处理 USER_ALL
+        // 也就是卸载所有用户中的该app
+        boolean ret = false;
+        if (isSystemApp(ps)) {
+            if (DEBUG_REMOVE) Slog.d(TAG, "Removing system package:" + ps.name);
+
+            ret = deleteSystemPackageLI(ps, allUserHandles, perUserInstalled,
+                    flags, outInfo, writeSettings);
+        } else {
+            if (DEBUG_REMOVE) Slog.d(TAG, "Removing non-system package:" + ps.name);
+            // 除了删除沙箱目录，/data/app/包名等文件外，还要删除其在PMS中的的数据结构，比如注册的组件等
+            // 这是由其内部的removePackageLI()方法完成的
+            killApplication(packageName, ps.appId, "uninstall pkg");
+            ret = deleteInstalledPackageLI(ps, deleteCodeAndResources, flags,
+                    allUserHandles, perUserInstalled,
+                    outInfo, writeSettings);
+        }
+
+        return ret;
+        .......
+
+```
+
+所谓的卸载apk就是这些内容了，删除文件以及其在PMS中的相关数据结构。

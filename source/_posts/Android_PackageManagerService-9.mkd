@@ -734,6 +734,8 @@ suffix为1,2.......
 
 继续分析installPackageLI：
 ```java
+
+
 startIntentFilterVerifications(args.user.getIdentifier(), replace, pkg);
 
       if (replace) {
@@ -1100,6 +1102,7 @@ private void processPendingInstall(final InstallArgs args, final int currentStat
            }
        });
    }
+```
 
 接下来就是发送POST_INSTALL消息，该消息的处理主要就是在发送广播，应用安装完成之后要通知系统中的其他应用开始处理，比如在launcher需要增加app的图标等。等发完广播，安装也就结束了，最后通过最初安装是传入的安装观察者observer返回最初的调用者。
 

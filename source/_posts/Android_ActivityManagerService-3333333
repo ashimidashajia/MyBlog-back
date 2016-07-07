@@ -1,0 +1,256 @@
+---
+layout: post
+title: Android6.0之AMS如何启动app
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-07-06 10:25:43
+
+---
+
+Android系统中进程只是一个运行组件的容器，当系统需要运行一个组件时，启动包含它的进程，当系统不在使用这个组件时，进程也会被关闭。一个APK文件的两个service可以运行一个进程中，也可以运行在各自进程中。Android的设计理念是弱化进程的存在，以组件的概念取而代之。
+
+<!--more-->
+
+Android应用开发中不在强调进程的概念，但是在AMS中，还必须管理和调度进程。AMS对进程的管理主要体现在两个方面：一是动态调整进程在mLruProcesses列表中的位置；二是调整进程的oom_adj的值。这两项调整和系统进行自动内存回收有关。当内存不足时，系统会关闭一些进程来释放内存。系统主要根据oom_adj的值来挑选要杀死的进程，oom_adj值越大表示进程可能被杀死。
+
+
+### ProcessRecord
+
+Android 中使用ProcessRecord类记录一个正在运行的进程的全部信息。该类的定义节选如下：
+
+```shell
+Android-6/frameworks/base/services/core/java/com/android/server/am/ProcessRecord.java
+```
+
+```java
+final class ProcessRecord {
+    private static final String TAG = TAG_WITH_CLASS_NAME ? "ProcessRecord" : TAG_AM;
+
+    private final BatteryStatsImpl mBatteryStats; // where to collect runtime statistics
+    // 与该进行关联的app的信息
+    final ApplicationInfo info; // all about the first app in the process
+    // 是否是独立进程
+    final boolean isolated;     // true if this is a special isolated process
+    // 进程uid，如果是独立进程的话，可能和info记录的uid不一致
+    final int uid;              // uid of process; may be different from 'info' if isolated
+    // 该进程的用户id
+    final int userId;           // user of process.
+    // 进程的名字
+    final String processName;   // name of the process
+
+    // List of packages running in the process
+    // 当前进程中所用的包
+   final ArrayMap<String, ProcessStats.ProcessStateHolder> pkgList = new ArrayMap<>();
+   UidRecord uidRecord;        // overall state of process's uid.
+   // 依赖的包
+   ArraySet<String> pkgDeps;   // additional packages we have a dependency on
+  .............
+   // 进程ID
+    int pid;                    // The process of this application; 0 if none
+    // 进程所在组
+    int[] gids;                 // The gids this process was launched with
+    // 进程运行时的abi
+    String requiredAbi;         // The ABI this process was launched with
+    // 进程运行时的inst
+    String instructionSet;      // The instruction set this process was launched with
+    // 进程是否开始运行
+    boolean starting;           // True if the process is being started
+    // 最近一次运行的时间
+    long lastActivityTime;      // For managing the LRU list
+
+    ..............
+    // 内存管理相关
+    int maxAdj;                 // Maximum OOM adjustment for this process
+    int curRawAdj;              // Current OOM unlimited adjustment for this process
+    int setRawAdj;              // Last set OOM unlimited adjustment for this process
+    int curAdj;                 // Current OOM adjustment for this process
+    int setAdj;                 // Last set OOM adjustment for this process
+    int curSchedGroup;          // Currently desired scheduling class
+    int setSchedGroup;          // Last set to background scheduling class
+    int trimMemoryLevel;        // Last selected memory trimming level
+    // 进程状态
+    int curProcState = PROCESS_STATE_NONEXISTENT; // Currently computed process state
+    // 上一次报告的进程状态
+    int repProcState = PROCESS_STATE_NONEXISTENT; // Last reported process state
+    int setProcState = PROCESS_STATE_NONEXISTENT; // Last set process state in process tracker
+    int pssProcState = PROCESS_STATE_NONEXISTENT; // Currently requesting pss for
+    .......
+    // 是否是被AMS主动杀掉的，而不是因为内存不足而被杀掉
+    boolean killedByAm;         // True when proc has been killed by activity manager, not for RAM
+    // 是否被杀掉
+    boolean killed;             // True once we know the process has been killed
+  ..............
+```
+
+ApplicationInfo类定义节选：
+
+```java
+public class ApplicationInfo extends PackageItemInfo implements Parcelable {
+
+
+    public String taskAffinity;
+
+    public String permission;
+
+    public String processName;
+
+    public String className;
+    ...........
+    public String sourceDir;
+..................
+   public String[] resourceDirs;
+.....................
+   public String[] sharedLibraryFiles;
+
+   public String dataDir;
+
+   public String nativeLibraryDir;
+   .....................
+
+  public String primaryCpuAbi;
+
+
+  public String secondaryCpuAbi;
+
+  public int uid;
+  .............
+
+  public int targetSdkVersion;
+  public int versionCode;
+```
+
+
+其中process状态定义在ActivityManager类中。
+
+源码路径：
+```shell
+ Android-6/frameworks/base/core/java/android/app/ActivityManager.java
+```
+
+```java
+/** @hide Process does not exist. */
+    public static final int PROCESS_STATE_NONEXISTENT = -1;
+
+    /** @hide Process is a persistent system process. */
+    public static final int PROCESS_STATE_PERSISTENT = 0;
+
+    /** @hide Process is a persistent system process and is doing UI. */
+    public static final int PROCESS_STATE_PERSISTENT_UI = 1;
+
+    /** @hide Process is hosting the current top activities.  Note that this covers
+     * all activities that are visible to the user. */
+    public static final int PROCESS_STATE_TOP = 2;
+
+    /** @hide Process is hosting a foreground service due to a system binding. */
+    public static final int PROCESS_STATE_BOUND_FOREGROUND_SERVICE = 3;
+
+    /** @hide Process is hosting a foreground service. */
+    public static final int PROCESS_STATE_FOREGROUND_SERVICE = 4;
+
+    /** @hide Same as {@link #PROCESS_STATE_TOP} but while device is sleeping. */
+    public static final int PROCESS_STATE_TOP_SLEEPING = 5;
+
+    /** @hide Process is important to the user, and something they are aware of. */
+    public static final int PROCESS_STATE_IMPORTANT_FOREGROUND = 6;
+
+    /** @hide Process is important to the user, but not something they are aware of. */
+    public static final int PROCESS_STATE_IMPORTANT_BACKGROUND = 7;
+
+    /** @hide Process is in the background running a backup/restore operation. */
+    public static final int PROCESS_STATE_BACKUP = 8;
+
+    /** @hide Process is in the background, but it can't restore its state so we want
+     * to try to avoid killing it. */
+    public static final int PROCESS_STATE_HEAVY_WEIGHT = 9;
+
+    /** @hide Process is in the background running a service.  Unlike oom_adj, this level
+     * is used for both the normal running in background state and the executing
+     * operations state. */
+    public static final int PROCESS_STATE_SERVICE = 10;
+
+    /** @hide Process is in the background running a receiver.   Note that from the
+     * perspective of oom_adj receivers run at a higher foreground level, but for our
+     * prioritization here that is not necessary and putting them below services means
+     * many fewer changes in some process states as they receive broadcasts. */
+    public static final int PROCESS_STATE_RECEIVER = 11;
+
+    /** @hide Process is in the background but hosts the home activity. */
+    public static final int PROCESS_STATE_HOME = 12;
+
+    /** @hide Process is in the background but hosts the last shown activity. */
+    public static final int PROCESS_STATE_LAST_ACTIVITY = 13;
+
+    /** @hide Process is being cached for later use and contains activities. */
+    public static final int PROCESS_STATE_CACHED_ACTIVITY = 14;
+
+    /** @hide Process is being cached for later use and is a client of another cached
+     * process that contains activities. */
+    public static final int PROCESS_STATE_CACHED_ACTIVITY_CLIENT = 15;
+
+    /** @hide Process is being cached for later use and is empty. */
+    public static final int PROCESS_STATE_CACHED_EMPTY = 16;
+```
+AMS中注册名为“processinfo”服务查询到的进程状态就是上面定义的。
+
+### addAppLocked()方法
+
+通过上一篇文章可知AMS启动的时候调用addAppLocked()方法将名为"android"的包以及带有persistent属性的的app启动。
+
+addAppLocked方法会检测应用是否有起来，如果没有将启动。现在分析这个方法：
+
+```java
+
+    final ProcessRecord addAppLocked(ApplicationInfo info, boolean isolated,
+            String abiOverride) {
+        ProcessRecord app;
+        // 判断是否是需要启动一个新的进程，是的话，要启动一个新的进程
+        if (!isolated) {
+          // 不需要重新启动一个新的进程的话，就在已经启动的进程列表中查找
+            app = getProcessRecordLocked(info.processName, info.uid, true);
+        } else {
+          // 需要重新启动一个新的进程，即使系统中已经有一个同名的进程存在
+            app = null;
+        }
+
+        if (app == null) {
+          // 创建一个新的ProcessRecord对象
+            app = newProcessRecordLocked(info, null, isolated, 0);
+            // 更新运行中的进程状态
+            updateLruProcessLocked(app, false, null);
+            // 更新进程的优先级
+            updateOomAdjLocked();
+        }
+
+        // This package really, really can not be stopped.
+        try {
+            AppGlobals.getPackageManager().setPackageStoppedState(
+                    info.packageName, false, UserHandle.getUserId(app.uid));
+        } catch (RemoteException e) {
+        } catch (IllegalArgumentException e) {
+            Slog.w(TAG, "Failed trying to unstop package "
+                    + info.packageName + ": " + e);
+        }
+        // 是否有persistent标签
+        if ((info.flags & PERSISTENT_MASK) == PERSISTENT_MASK) {
+            app.persistent = true;
+            app.maxAdj = ProcessList.PERSISTENT_PROC_ADJ;
+        }
+        if (app.thread == null && mPersistentStartingProcesses.indexOf(app) < 0) {
+
+            // 记录带有persistent属性的app
+            mPersistentStartingProcesses.add(app);
+            // 启动进程
+            startProcessLocked(app, "added application", app.processName, abiOverride,
+                    null /* entryPoint */, null /* entryPointArgs */);
+        }
+
+        return app;
+    }
+
+```
+addAppLocked()方法会根据参数isolated来决定是否启动一个新的进程，如果isolated为true,纵然系统中可能已经有一个同名的进程存在，也会在创建一个新的进程。getProcessRecordLocked()方法用来在当前运行的进程列表中查找进程。最后调用startProcessLocked()方法创建进程。
+
+
+### startProcessLocked()方法
+
+AMS通过startProcessLocked()来启动一个进程。该方法有多个重载形式。

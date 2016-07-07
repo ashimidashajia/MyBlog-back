@@ -1,0 +1,413 @@
+---
+layout: post
+title: Android6.0之AMS如何启动app上篇
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-07-07 17:11:50
+
+---
+
+前面简单介绍了AMS的启动过程。现在从启动一个APP开始分析AMS在这个过程中究竟做了哪些事情，从而找出AMS中重要的数据结构。启动App，通常是启动该App的一个Activity,一般是主Activity.
+
+<!--more-->
+
+用户从Launcher程序点击应用图标可启动应用的入口Activity，Activity启动时需要多个进程之间的交互，如下图所示：
+
+![][1]
+
+其中AMS进程实际上是SystemServer进程，因为AMS只是SystemServer启动的一个服务而已，运行在SystemServer的某个线程中。
+
+
+用户在Launcher程序里点击应用图标时，会通知ActivityManagerService启动应用的主Activity，ActivityManagerService发现这个应用还未启动，则会通知Zygote进程孵化出应用进程，然后在这个新孵化的应用进程里执行ActivityThread的main方法。应用进程接下来通知ActivityManagerService应用进程已启动，ActivityManagerService保存应用进程的一个代理对象，这样ActivityManagerService可以通过这个代理对象控制应用进程，然后ActivityManagerService通知应用进程创建主Activity的实例，并执行它的生命周期方法，也就是诸如OnCreadte()等方法。
+
+
+### Launcher启动app的真正入口点
+
+Launcher 使用一个带有 Intent.FLAG_ACTIVITY_NEW_TASK flag 的 Intent，调用 startActivity 方法来启动App.
+
+源码路径：
+
+```shell
+Android-6/packages/apps/Launcher3/src/com/android/launcher3/Launcher.java
+Android-6/packages/apps/Launcher3/src/com/android/launcher3/AppInfo.java
+```
+
+launcher上显示的每一个app都创建了一个用来启动他的intent，是一个显示的intent。组件名字是要启动的app的主activity名字。flag在后面会在添加一个标志。
+
+```java
+public static Intent makeLaunchIntent(Context context, LauncherActivityInfoCompat info,
+            UserHandleCompat user) {
+        long serialNumber = UserManagerCompat.getInstance(context).getSerialNumberForUser(user);
+        return new Intent(Intent.ACTION_MAIN)
+            .addCategory(Intent.CATEGORY_LAUNCHER)
+            .setComponent(info.getComponentName())
+            .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+            .putExtra(EXTRA_PROFILE, serialNumber);
+    }
+```
+
+当在launcher点击一个app的图标时的一个简要调用流程：
+
+```java
+/**
+     * Launches the intent referred by the clicked shortcut.
+     *
+     * @param v The view representing the clicked shortcut.
+     */
+public void onClick(View v) {
+      ............
+      Object tag = v.getTag();
+      if (tag instanceof ShortcutInfo) {
+          onClickAppShortcut(v);
+      }
+       ...........
+  }
+
+
+protected void onClickAppShortcut(final View v) {
+......
+      // Start activities
+      startAppShortcutOrInfoActivity(v);
+.......
+}
+
+
+void startAppShortcutOrInfoActivity(View v) {
+............
+        // 得到launcher提供的启动这个app主activity的intent
+        intent = shortcut.intent;
+...........
+        boolean success = startActivitySafely(v, intent, tag);
+............
+    }
+
+ boolean startActivitySafely(View v, Intent intent, Object tag) {
+
+  ...................      
+  success = startActivity(v, intent, tag);
+  ...................
+
+}
+
+
+private boolean startActivity(View v, Intent intent, Object tag) {
+       intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        ...........
+        startActivity(intent, optsBundle);
+        ...............
+}
+```
+
+从以上代码流程可知当Launcher启动一个app时，会在自己的startActivity()方法中为Intent中添加一个FLAG_ACTIVITY_NEW_TASK flag，然后调用继承自Activity的startActivity()方法来进一步启动app.
+
+
+
+这样就找到了launcher启动一个app时的真正入口点了：Activity类的startActivity()方法。
+
+```java
+public void startActivity(Intent intent, @Nullable Bundle options) {
+    if (options != null) {
+        startActivityForResult(intent, -1, options);
+    } else {
+        startActivityForResult(intent, -1);
+    }
+}
+```
+
+### Activity向AMS发起请求启动App
+
+这个过程调用时序图如下所示：
+
+![][2]
+
+Instrumentation和Activity有点类似，只不过Activity是需要一个界面的，而Instrumentation并不是这样的，我们可以将它理解为一种没有图形界面的，具有启动能力的，用于监控其他类(用Target Package声明)的工具类。在Android系统中常用来监控应用程序和系统交互。在App开发中可以用来编写测试用例。
+
+另外两个类ActivityManagerNative和ActivityManagerProxy,在前面的文章已经介绍过了。这里就是获取AMS的一个代理对象，然后调用代理对象的startActivity(),实际上就是调用AMS的startActivity()方法来启动app。
+
+这里要还要重点注意一下execStartActivity的第二个参数IBinder contextThread：
+
+```java
+public ActivityResult execStartActivity(
+        Context who, IBinder contextThread, IBinder token, Activity target,
+        Intent intent, int requestCode, Bundle options) {
+    IApplicationThread whoThread = (IApplicationThread) contextThread;
+    Uri referrer = target != null ? target.onProvideReferrer() : null;
+    ....................
+```
+
+它是Activity类的startActivityForResult()方法中以下面代码所示的方法传入的：
+```java
+public void startActivityForResult(Intent intent, int requestCode, @Nullable Bundle options) {
+        if (mParent == null) {
+            Instrumentation.ActivityResult ar =
+            //注意第二个参数
+            mInstrumentation.execStartActivity(
+            this, mMainThread.getApplicationThread(), mToken, this,
+            intent, requestCode, options);
+            .................
+```
+变量mMainThread是Activity类中ActivityThread类型的成员。
+
+ActivityThread类是Android应用进程的核心类，这个类包含了应用框架中其他重要的类。
+
+源码路径：
+```shell
+ Android-6/frameworks/base/core/java/android/app/ActivityThread.java
+```
+节选定义如下，先看源码对其的注释，就知道这个类的重要性了。
+
+```java
+/**
+ * This manages the execution of the main thread in an
+ * application process, scheduling and executing activities,
+ * broadcasts, and other operations on it as the activity
+ * manager requests.
+ *
+ * {@hide}
+ */
+public final class ActivityThread {
+........
+private ContextImpl mSystemContext;
+
+static IPackageManager sPackageManager;
+// 保存该app中所有的Activity
+final ArrayMap<IBinder, ActivityClientRecord> mActivities = new ArrayMap<>();
+// 保存该app中所有的service
+final ArrayMap<IBinder, Service> mServices = new ArrayMap<>();
+// 保存该app中所有的provider
+final ArrayMap<ProviderKey, ProviderClientRecord> mProviderMap
+        = new ArrayMap<ProviderKey, ProviderClientRecord>();
+//管理应用的资源
+private final ResourcesManager mResourcesManager;
+
+// 存储包含代码，即dex文件的apk文件保存在该变量中
+final ArrayMap<String, WeakReference<LoadedApk>> mPackages
+        = new ArrayMap<String, WeakReference<LoadedApk>>();
+// 不包含代码，紧紧包含资源的apk放在该变量中
+final ArrayMap<String, WeakReference<LoadedApk>> mResourcePackages
+
+// 如果app中自己实现了Application的子类，并在清单文件中声明了，那么该变量就指向自己实现的那个子类对象
+Application mInitialApplication;
+
+AppBindData mBoundApplication;
+
+// 用于binder通信，AMS通过它来调用应用的接口
+final ApplicationThread mAppThread = new ApplicationThread();
+
+// 主线程中的Handler
+static Handler sMainThreadHandler;  // set once in main()
+
+final Looper mLooper = Looper.myLooper();
+
+// H继承自Handler,mH用来发送和处理ApplicationThread通过binder接受的AMS请求
+final H mH = new H();
+
+.........
+}
+```
+ActivityThread类中没有定义数据结构来存储BroadcastReceiver对象，因为BroadcastReceiver对象生命周期很短暂，属于调用一次运行一次的类型，因此不需要保存其对象。
+
+AppBindData类为ActivityThread的内部类，定义如下，记录了与之绑定的app的相关数据。
+```java
+static final class AppBindData {
+    LoadedApk info;
+    String processName;
+    ApplicationInfo appInfo;
+    List<ProviderInfo> providers;
+    ComponentName instrumentationName;
+    Bundle instrumentationArgs;
+    IInstrumentationWatcher instrumentationWatcher;
+    IUiAutomationConnection instrumentationUiAutomationConnection;
+    int debugMode;
+    boolean enableOpenGlTrace;
+    boolean restrictedBackupMode;
+    boolean persistent;
+    Configuration config;
+    CompatibilityInfo compatInfo;
+
+    /** Initial values for {@link Profiler}. */
+    ProfilerInfo initProfilerInfo;
+
+    public String toString() {
+        return "AppBindData{appInfo=" + appInfo + "}";
+    }
+}
+```
+
+其中 ApplicationThread类型的变量mAppThread用于AMS所在app的接口，应用进程需要调用AMS提供的功能，而AMS也需要主动调用应用进程以控制应用进程并完成指定操作。这样AMS就需要应用进程的一个Binder代理对象。
+
+如下图所示
+
+![][3]
+
+AMS通过IApplicationThread接口管理应用进程，ApplicationThread类实现了IApplicationThread接口，实现了管理应用的操作，ApplicationThread对象运行在应用进程里。ApplicationThreadProxy对象是ApplicationThread对象在AMS线程 (AMS线程运行在system_server进程)内的代理对象，AMS通过ApplicationThreadProxy对象调用ApplicationThread提供的功能，比如让应用进程启动某个Activity。
+
+ApplicationThread中的scheduleDestroyActivity方法如下：
+```java
+public final void scheduleDestroyActivity(IBinder token, boolean finishing,
+               int configChanges) {
+           sendMessage(H.DESTROY_ACTIVITY, token, finishing ? 1 : 0,
+                   configChanges);
+}
+```
+作为Binder服务端的方法实际上是调用ActivityThread类的下面两个方法完成的。（ApplicationThread是ActivityThread内部类）
+
+```java
+private void sendMessage(int what, Object obj, int arg1, int arg2) {
+    sendMessage(what, obj, arg1, arg2, false);
+}
+
+private void sendMessage(int what, Object obj, int arg1, int arg2, boolean async) {
+    if (DEBUG_MESSAGES) Slog.v(
+        TAG, "SCHEDULE " + what + " " + mH.codeToString(what)
+        + ": " + arg1 + " / " + obj);
+    Message msg = Message.obtain();
+    msg.what = what;
+    msg.obj = obj;
+    msg.arg1 = arg1;
+    msg.arg2 = arg2;
+    if (async) {
+        msg.setAsynchronous(true);
+    }
+    mH.sendMessage(msg);
+}
+```
+那么在ActivityThread类中内部类H（继承自Handler，mH就是H的对象），中肯定义了处理消息的handleMessage()方法，
+
+```java
+case DESTROY_ACTIVITY:
+                    Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "activityDestroy");
+                    handleDestroyActivity((IBinder)msg.obj, msg.arg1 != 0,
+                            msg.arg2, false);
+                    Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+                    break;
+```
+handleDestroyActivity是ActivityThread类中定义的方法。也就是说实际的处理都是在ActivityThread类中完成的，ActivityThread类仅仅负责通信而已。
+
+这里利用Handler机制，很巧妙的以异步方式执行了binder的请求。理解了这个过程后，在分析ApplicationThread类中的接口时，就不用再关心消息传递过程了，直接在ActivityThread类查找对应的方法。
+
+binder中定义的方法以"schedule"开头，与之对应的ActivityThread类中的处理方法以"handle"开头。
+
+### AMS启动app
+
+前面分析到开始调用AMS的startActivity方法了
+
+```java
+public final int startActivity(IApplicationThread caller, String callingPackage,
+          Intent intent, String resolvedType, IBinder resultTo, String resultWho, int requestCode,
+          int startFlags, ProfilerInfo profilerInfo, Bundle options) {
+      return startActivityAsUser(caller, callingPackage, intent, resolvedType, resultTo,
+          resultWho, requestCode, startFlags, profilerInfo, options,
+          UserHandle.getCallingUserId());
+  }
+
+
+  public final int startActivityAsUser(IApplicationThread caller, String callingPackage,
+            Intent intent, String resolvedType, IBinder resultTo, String resultWho, int requestCode,
+            int startFlags, ProfilerInfo profilerInfo, Bundle options, int userId) {
+        // 如果是隔离的应用的话，不允许其打开其他app的activity
+        //  appid是99000-99999之间的属于隔离app
+        enforceNotIsolatedCaller("startActivity");
+        userId = handleIncomingUser(Binder.getCallingPid(), Binder.getCallingUid(), userId,
+                false, ALLOW_FULL_ONLY, "startActivity", null);
+        // TODO: Switch to user app stacks here.
+        return mStackSupervisor.startActivityMayWait(caller, -1, callingPackage, intent,
+                resolvedType, null, null, resultTo, resultWho, requestCode, startFlags,
+                profilerInfo, null, null, options, false, userId, null, null);
+    }
+```
+
+判断发起者是否是隔离的app，不允许隔离的app调用其他app。然后调用ActivityStackSupervisor类中的startActivityMayWait方法
+
+```java
+final int startActivityMayWait(IApplicationThread caller, int callingUid,
+            String callingPackage, Intent intent, String resolvedType,
+            IVoiceInteractionSession voiceSession, IVoiceInteractor voiceInteractor,
+            IBinder resultTo, String resultWho, int requestCode, int startFlags,
+            ProfilerInfo profilerInfo, WaitResult outResult, Configuration config,
+            Bundle options, boolean ignoreTargetSecurity, int userId,
+            IActivityContainer iContainer, TaskRecord inTask) {
+        // Refuse possible leaked file descriptors
+        if (intent != null && intent.hasFileDescriptors()) {
+            throw new IllegalArgumentException("File descriptors passed in Intent");
+        }
+        // 当启动一个app时 ，launcher会构造一个intent，前面已经介绍了，是一个显示的intent
+        // 所以这里为true，
+        boolean componentSpecified = intent.getComponent() != null;
+
+        // Don't modify the client's object!
+        // 创建一个新的intent，方便改动
+        intent = new Intent(intent);
+
+        // 收集 要启动的app的主activity的信息
+        ActivityInfo aInfo =
+                resolveActivity(intent, resolvedType, startFlags, profilerInfo, userId);
+
+        // 传入的该参数为null
+        ActivityContainer container = (ActivityContainer)iContainer;
+        synchronized (mService) {
+            if (container != null && container.mParentActivity != null &&
+                    container.mParentActivity.state != RESUMED) {
+                // Cannot start a child activity if the parent is not resumed.
+                return ActivityManager.START_CANCELED;
+            }
+        ....................................
+            final ActivityStack stack;
+            if (container == null || container.mStack.isOnHomeDisplay()) {
+                stack = mFocusedStack;
+            } else {
+                stack = container.mStack;
+            }
+            // 传入的config为null
+            stack.mConfigWillChange = config != null && mService.mConfiguration.diff(config) != 0;
+            if (DEBUG_CONFIGURATION) Slog.v(TAG_CONFIGURATION,
+                    "Starting activity when config will change = " + stack.mConfigWillChange);
+
+            final long origId = Binder.clearCallingIdentity();
+
+            if (aInfo != null &&
+                    (aInfo.applicationInfo.privateFlags
+                            &ApplicationInfo.PRIVATE_FLAG_CANT_SAVE_STATE) != 0) {
+              .......................
+              }
+
+            int res = startActivityLocked(caller, intent, resolvedType, aInfo,
+                    voiceSession, voiceInteractor, resultTo, resultWho,
+                    requestCode, callingPid, callingUid, callingPackage,
+                    realCallingPid, realCallingUid, startFlags, options, ignoreTargetSecurity,
+                    componentSpecified, null, container, inTask);
+
+            Binder.restoreCallingIdentity(origId);
+
+            if (stack.mConfigWillChange) {
+              .............
+            }
+            // 传入的为null
+            if (outResult != null) {
+              .......................
+                 mService.wait(); //等待应用进程的activity启动完成
+             ...........
+            }
+            .............
+            }
+
+            return res;
+        }
+    }
+```
+
+startActivityAsUser()方法最主要的目地是进行权限检查，检查发起者是否被隔离，是的话，是不允许调用别的app的activity的。然后就是检查调用者的是否有权限执行启动app的操作.
+
+startActivityMayWait()方法主要是利用传入的intent去向PMS搜集要启动的APP的信息,储存到aInfo中.名字中有wait字眼,预示着该方法可能导致线程等待.不过在我们这个场景中不会出现这种情况.因为wait出现在对结果的处理中,我们这个场景中是不需要处理结果的.
+
+接下去就调用startActivityLocked进一步处理了。
+
+到这里为止的时序图如下所示：
+
+![][4]
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-3.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-4.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-5.png
+[4]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-8.png
