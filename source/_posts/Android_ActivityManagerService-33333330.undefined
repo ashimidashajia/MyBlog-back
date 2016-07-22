@@ -1,0 +1,48 @@
+
+AMS 进程管理 素材:
+
+Android app被系统kill的场景
+
+http://www.jianshu.com/p/0f9ecdd19752
+
+理解杀进程的实现原理
+http://gityuan.com/2016/04/16/kill-signal/
+
+
+Android ActivityManagerService（AMS）的进程管理
+http://blog.csdn.net/baniel01/article/details/51828644
+
+................................
+
+ Android中ActivityManagerService与应用程序(客户端)通信模型分析
+http://blog.csdn.net/qinjuning/article/details/7262769
+
+
+
+管理Activity
+http://anany.me/2015/05/11/ams/
+
+
+activity启动模式
+
+
+Android 5.0重启恢复Task功能分析
+http://blog.csdn.net/guoqifa29/article/details/45622585
+
+startActivityFromRecentsInner----------startActivityInPackage-----------startActivityMayWait
+
+
+
+
+
+
+深入理解Activity——Token之旅
+http://blog.csdn.net/guoqifa29/article/details/46819377
+
+
+安卓(Android)Activity启动过程性能剖视(1)
+http://www.rudy-yuan.net/archives/59/
+
+
+老生常谈 activity 启动模式
+http://blog.csdn.net/iceqi1979/article/details/51877911

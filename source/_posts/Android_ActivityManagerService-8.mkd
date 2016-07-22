@@ -1,0 +1,1611 @@
+---
+layout: post
+title: Android6.0之AMS启动app中篇之创建app进程
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-07-07 17:11:50
+
+---
+
+前面分析到了ActivityStackSupervisor类中的startActivityUncheckedLocked方法,该方法主要是为要启动的activity准备一个task:有可复用的task,就直接使用;没有的话,就先寻找一个合适的ActivityStack,移动到前台后创建一个新的Task.紧接着调用ActivityStack的startActivityLocked()方法继续启动.
+
+<!--more-->
+
+### ActivityStack的startActivityLocked()
+
+首先分析参数:
+
+```java
+final void startActivityLocked(
+ActivityRecord r, // 要启动的activity
+boolean newTask,//是否新建了task,传入的true
+boolean doResume,// 是否执行resume,传入的true
+boolean keepCurTransition,// 传入的fasle,当要从一个activity启动一个activity,而且启动这个activity时,设置了FLAG_ACTIVITY_CLEAR_TOP,传入true
+Bundle options)
+```
+
+如果是新创建的task,这个task已经在ActivityStack的顶端,而且其所在的Activitystack也在绑定的屏幕的顶端:
+
+```java
+// r.task就是在startActivityUncheckedLocked中创建的新的task的TaskRecord对象，取出来保存到rRask变量中
+TaskRecord rTask = r.task;
+final int taskId = rTask.taskId;
+// 如果是新创建的task的话
+// taskForIdLocked在历史栈中查询是否含有id号为目标类所在的栈id，如果有，表明目标类之前已经被创建过，现在开始复用该对象，属于非首次启动，
+// newTask传递过来为true
+if (!r.mLaunchTaskBehind && (taskForIdLocked(taskId) == null || newTask)) {
+
+    // 将其移到activitystack的顶部,也就是mTaskHistory的尾部
+    insertTaskAtTop(rTask, r);
+    mWindowManager.moveTaskToTop(taskId);
+}
+```
+
+如果不需要新创建task:(从launcher第一次启动app,会创建新的task,所以不走这块代码)
+
+```java
+TaskRecord task = null;
+if (!newTask) {
+    boolean startIt = true;
+    // 从 mTaskHistory中找到启动这个activity的activity所在的task
+    for (int taskNdx = mTaskHistory.size() - 1; taskNdx >= 0; --taskNdx) {
+        task = mTaskHistory.get(taskNdx);
+        if (task.getTopActivity() == null) {
+            // All activities in task are finishing.
+            continue;
+        }
+        // 找到了
+        if (task == r.task) {
+            if (!startIt) {
+                ............
+                ActivityOptions.abort(options);
+                return;
+            }
+            break;
+        }// 如果在前面的task中有全屏应用存在,例如播放器等,设置为false.
+        else if (task.numFullscreen > 0) {
+            startIt = false;
+        }
+    }
+}
+```
+上面代码就是从activitystack的mTaskHistory中找到启动这个activity的activity的task.
+
+如果找到的这个task不在ActivityStack的顶端,那就没必要让当前正在显示的activity执行onUserLeaving操作.
+```java
+if (task == r.task && mTaskHistory.indexOf(task) != (mTaskHistory.size() - 1)) {
+            mStackSupervisor.mUserLeaving = false;
+            if (DEBUG_USER_LEAVING) Slog.v(TAG_USER_LEAVING,
+                    "startActivity() behind front, mUserLeaving=false");
+        }
+
+```
+
+接着把要启动的activity放入Task的顶端,并设置inHistory为true;
+
+```java
+task = r.task;
+task.addActivityToTop(r);
+task.setFrontOfTask();
+r.putInHistory();
+```
+
+下面WMS开始准备绘制activity以及切换Activity时的动画.略过:
+
+```java
+if (!isHomeStack() || numActivities() > 0){
+  ...
+  // 一个activity的UI界面要想再终端屏幕上显示出来，很重要的一点就是他必须向WMS中添加token，以便于WMS在启动窗口的时候能够找到它
+  mWindowManager.addAppToken(task.mActivities.indexOf(r),
+                   r.appToken, r.task.taskId, mStackId, r.info.screenOrientation, r.fullscreen,
+                   (r.info.flags & ActivityInfo.FLAG_SHOW_FOR_ALL_USERS) != 0, r.userId,
+                   r.info.configChanges, task.voiceSession != null, r.mLaunchTaskBehind);
+     boolean doShow = true;
+     if (newTask) {
+         if ((r.intent.getFlags() & Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED) != 0) {
+           // 处理FLAG_ACTIVITY_RESET_TASK_IF_NEEDED,rest  task
+             resetTaskIfNeededLocked(r, r);
+             // 得到rest task之后,task的顶端activity是否与要启动的activity一致
+             doShow = topRunningNonDelayedActivityLocked(null) == r;
+         }
+     } else if (options != null && new ActivityOptions(options).getAnimationType()
+             == ActivityOptions.ANIM_SCENE_TRANSITION) {
+         doShow = false;
+     }
+  ...
+}else{
+
+}
+```
+上述代码中关键的一点是:当是新创建task的时候,此时这个task的affinity就是activity的taskAffinity.这个要启动activity就是这个task的root activity.
+
+这时候如果flag中包含FLAG_ACTIVITY_RESET_TASK_IF_NEEDED,那么就会寻找当前activitystack中所有task中是设置了允许TaskReparenting,而又与其启动者没有依赖关系的activity(activity的resultTo为空),查看他们指定的task是不是现在这个新创建的task,是的话移动到这个新创建的task中来.
+
+
+Task的startActivityLocked()方法主要就是将要启动的Activity加入到task的顶部.如果传入的newTask为true,表明创建了新的task,这是还要检查是否进行rest  task操作处理TaskReparenting;为false,表明没有创建task,而是将activity加入到启动他的activity所在的task中.然后把task调整到ActivityStack中的mTaskHistory的顶部.也就是将task移动到栈顶.然后调用
+
+```java
+// 传入的为true
+if (doResume) {
+            mStackSupervisor.resumeTopActivitiesLocked(this, r, options);
+        }
+```
+开始显示task顶部的activity(并不一定是要启动的activity).
+
+
+### ActivityStackSupervisor.resumeTopActivitiesLocked()方法
+
+
+这里要说明下,当从launcher,也就是桌面切换到一个app的activity的时候,前面也说了如果这个app所在的activitystack和homestack处于同一个屏幕中,就要调用ActivityStackSupervisor.moveHomeStack方法,来移动homestack.(确切的是当调用Activitystack.moveToFront()方法时,会进行这样的操作.)这时,mFocusedStack就会发生变化了,之前mFocusedStack是mhomeStack.在moveHomeStack方法会将其设置为即将显示的activity所在的ActivityStack.
+
+```java
+boolean resumeTopActivitiesLocked(ActivityStack targetStack, ActivityRecord target,
+          Bundle targetOptions) {
+      // 如果传入的ActivityStack为null,那么设置为当前处于前台的ActivityStack
+      if (targetStack == null) {
+          targetStack = mFocusedStack;
+      }
+      // Do targetStack first.
+      boolean result = false;
+      // 检查targetStack是否和mFocusedStack一致.这里是一致的.原因前面解释了.
+      if (isFrontStack(targetStack)) {
+          result = targetStack.resumeTopActivityLocked(target, targetOptions);
+      }
+
+      ............
+      return result;
+  }
+```
+
+### ActivityStack.resumeTopActivityLocked()方法
+
+```java
+final boolean resumeTopActivityLocked(ActivityRecord prev, Bundle options) {
+   // 如果当前正在resume顶端activity的话，那就直接返回false
+    if (mStackSupervisor.inResumeTopActivity) {
+        // Don't even start recursing.
+        return false;
+    }
+
+    boolean result = false;
+    try {
+        // Protect against recursion.
+        mStackSupervisor.inResumeTopActivity = true;
+        if (mService.mLockScreenShown == ActivityManagerService.LOCK_SCREEN_LEAVING) {
+            mService.mLockScreenShown = ActivityManagerService.LOCK_SCREEN_HIDDEN;
+            mService.updateSleepIfNeededLocked();
+        }
+        result = resumeTopActivityInnerLocked(prev, options);
+    } finally {
+        mStackSupervisor.inResumeTopActivity = false;
+    }
+    return result;
+}
+```
+实际上是调用resumeTopActivityInnerLocked()方法
+
+### ActivityStack.resumeTopActivityInnerLocked
+
+方法代码又是很多..........看注释吧!
+
+```java
+private boolean resumeTopActivityInnerLocked(ActivityRecord prev, Bundle options) {
+      if (DEBUG_LOCKSCREEN) mService.logLockScreen("");
+
+      if (!mService.mBooting && !mService.mBooted) {
+          // Not ready yet!
+          return false;
+      }
+
+      ActivityRecord parent = mActivityContainer.mParentActivity;
+      if ((parent != null && parent.state != ActivityState.RESUMED) ||
+              !mActivityContainer.isAttachedLocked()) {
+          // Do not resume this stack if its parent is not resumed.
+          // TODO: If in a loop, make sure that parent stack resumeTopActivity is called 1st.
+          return false;
+      }
+```
+这里的操作还是比较简单的，首先查看系统是否启动完成了，否则就直接返回。如果启动当前activity的activity本身的状态不是RESUMED的话，那么不能启动activity，直接返回false。
+
+
+接下来找到,要启动的activity,这里实际上就是task的顶端activity.经过前面的过程,当前前台的task的就是运行要启动的activity所需的task.但至于顶端是否是要启动的activity那就不一定了.
+
+```java
+// next就是要启动的activity
+final ActivityRecord next = topRunningActivityLocked(null);
+
+final boolean userLeaving = mStackSupervisor.mUserLeaving;
+mStackSupervisor.mUserLeaving = false;
+
+// prevTask就是要启动的activity所在的task
+final TaskRecord prevTask = prev != null ? prev.task : null;
+
+// 没有要启动的activity,那就显示home
+if (next == null) {
+  ....
+  ....
+}
+
+// 不需要延时resume
+next.delayedResume = false;
+// If the top activity is the resumed one, nothing to do.
+// 如果显示的activity就是要启动的activity,那么直接返回false
+if (mResumedActivity == next && next.state == ActivityState.RESUMED &&
+          mStackSupervisor.allResumedActivitiesComplete()) {
+  ............
+  return false;
+}
+// 下面又是做了一些检查而已
+// 其中在创建task的时候
+//  taskType = APPLICATION_ACTIVITY_TYPE;
+//  mTaskToReturnTo = HOME_ACTIVITY_TYPE;
+// 所以isOverHomeStack返回true
+if (prevTask != null && prevTask.stack == this &&
+      prevTask.isOverHomeStack() && prev.finishing && prev.frontOfTask) {
+  if (DEBUG_STACK)  mStackSupervisor.validateTopActivitiesLocked();
+  // 几乎都满足这个条件,而setFrontOfTask前面已经做过了
+  if (prevTask == nextTask) {
+      prevTask.setFrontOfTask();
+  } else if (prevTask != topTask()) {
+      // This task is going away but it was supposed to return to the home stack.
+      // Now the task above it has to return to the home task instead.
+      // 如果task销毁了,移动到home
+      final int taskNdx = mTaskHistory.indexOf(prevTask) + 1;
+      mTaskHistory.get(taskNdx).setTaskToReturnTo(HOME_ACTIVITY_TYPE);
+  } else if (!isOnHomeDisplay()) {
+      return false;
+  } else if (!isHomeStack()){
+      ..............
+  }
+}
+```
+接下来还是做检查:如果系统当前准备休眠或者关机，如果是的话，那么就放弃本次启动。
+
+```java
+// If we are sleeping, and there is no resumed activity, and the top
+// activity is paused, well that is the state we want.
+if (mService.isSleepingOrShuttingDown()
+        && mLastPausedActivity == next
+        && mStackSupervisor.allPausedActivitiesComplete()) {
+    // Make sure we have executed any pending transitions, since there
+    // should be nothing left to do at this point.
+    mWindowManager.executeAppTransition();
+    mNoAnimActivities.clear();
+    ActivityOptions.abort(options);
+    if (DEBUG_STATES) Slog.d(TAG_STATES,
+            "resumeTopActivityLocked: Going to sleep and all paused");
+    if (DEBUG_STACK) mStackSupervisor.validateTopActivitiesLocked();
+    return false;
+}
+
+```
+
+还是做检查,检查这个activity的用户已经启动了.
+
+```java
+// Make sure that the user who owns this activity is started.  If not,
+// we will just leave it as is because someone should be bringing
+// another user's activities to the top of the stack.
+if (mService.mStartedUsers.get(next.userId) == null) {
+  Slog.w(TAG, "Skipping resume of top activity " + next
+          + ": user " + next.userId + " is stopped");
+  if (DEBUG_STACK) mStackSupervisor.validateTopActivitiesLocked();
+  return false;
+}
+
+// The activity may be waiting for stop, but that is no longer
+// appropriate for it.
+mStackSupervisor.mStoppingActivities.remove(next);
+mStackSupervisor.mGoingToSleepActivities.remove(next);
+next.sleeping = false;
+mStackSupervisor.mWaitingVisibleActivities.remove(next);
+```
+如果当前启动的activity正在等待stop，那么就放弃stop直接启动。因为现在已经没有必要将它stop了。
+
+如果我们当前正在pause一个activity，那么我们需要等到我们的pause动作完成了才能开始启动activity。
+
+```java
+// We need to start pausing the current activity so the top one
+       // can be resumed...
+       boolean dontWaitForPause = (next.info.flags&ActivityInfo.FLAG_RESUME_WHILE_PAUSING) != 0;
+       boolean pausing = mStackSupervisor.pauseBackStacks(userLeaving, true, dontWaitForPause);
+       if (mResumedActivity != null) {
+           if (DEBUG_STATES) Slog.d(TAG_STATES,
+                   "resumeTopActivityLocked: Pausing " + mResumedActivity);
+           pausing |= startPausingLocked(userLeaving, false, true, dontWaitForPause);
+       }
+       if (pausing) {
+           if (DEBUG_SWITCH || DEBUG_STATES) Slog.v(TAG_STATES,
+                   "resumeTopActivityLocked: Skip resume: need to start pausing");
+           // At this point we want to put the upcoming activity's process
+           // at the top of the LRU list, since we know we will be needing it
+           // very soon and it would be a waste to let it get killed if it
+           // happens to be sitting towards the end.
+           if (next.app != null && next.app.thread != null) {
+               mService.updateLruProcessLocked(next.app, true, null);
+           }
+           if (DEBUG_STACK) mStackSupervisor.validateTopActivitiesLocked();
+           return true;
+       }
+```
+
+继续,如果activity所在的app进程已经启动,那么直接显示activity.
+```java
+ActivityStack lastStack = mStackSupervisor.getLastStack();
+        if (next.app != null && next.app.thread != null)
+{
+            if (DEBUG_SWITCH) Slog.v(TAG_SWITCH, "Resume running: " + next);
+
+            // This activity is now becoming visible.
+            mWindowManager.setAppVisibility(next.appToken, true);
+          ..........
+            mService.updateCpuStats();
+         ..........
+            try {
+                //这个activity还有等待返回的结果,先发送结果
+                ArrayList<ResultInfo> a = next.results;
+                if (a != null) {
+                    final int N = a.size();
+                    if (!next.finishing && N > 0) {
+                        if (DEBUG_RESULTS) Slog.v(TAG_RESULTS,
+                                "Delivering results to " + next + ": " + a);
+                        next.app.thread.scheduleSendResult(next.appToken, a);
+                    }
+                }
+
+                // 此时,说明要启动的activity已经存在,直接回调应用的onNewIntent方法
+                if (next.newIntents != null) {
+                    next.app.thread.scheduleNewIntent(next.newIntents, next.appToken);
+                }
+
+              ............
+              //调用activity的onResume
+                next.app.thread.scheduleResumeActivity(next.appToken, next.app.repProcState,
+                        mService.isNextTransitionForward(), resumeAnimOptions);
+
+                mStackSupervisor.checkReadyForSleepLocked();
+
+                if (DEBUG_STATES) Slog.d(TAG_STATES, "resumeTopActivityLocked: Resumed " + next);
+            } catch (Exception e) {
+            ..............
+            }
+
+          .............
+
+        }else{
+          // 如过activity所在的进程还没启动,那么就使用下面的方法启动app进程.
+          mStackSupervisor.startSpecificActivityLocked(next, true, true);
+        }
+```
+
+resumeTopActivityInnerLocked()方法代码很长,检查的代码太多了,其实主要做了如下工作:
+
+1. 如果要启动的activity所在的进程已经启动,那么调用应用的scheduleResumeActivity恢复activity即可(如果此activity已经存在,那么需要先scheduleNewIntent,也就是调用onNewIntent方法)
+
+2. 如果要启动的activity所在的app进程还没启动,那么调用mStackSupervisor.startSpecificActivityLocked启动app进程,第一次启动app时,符合这个逻辑.
+
+
+### ActivityStackSupervisor.startSpecificActivityLocked()方法
+
+```java
+void startSpecificActivityLocked(ActivityRecord r,
+            boolean andResume, boolean checkConfig) {
+        // Is this activity's application already running?
+        ProcessRecord app = mService.getProcessRecordLocked(r.processName,
+                r.info.applicationInfo.uid, true);
+
+        r.task.stack.setLaunchTime(r);
+
+        // 第一次启动app时,肯定app进程还没启动
+        if (app != null && app.thread != null) {
+          .........
+        }
+        // 调用AMS的startProcessLocked创建成
+        mService.startProcessLocked(r.processName, r.info.applicationInfo, true, 0,
+                "activity", r.intent.getComponent(), false, false, true);
+    }
+```
+
+### ActivityManagerService.startProcessLocked()方法
+
+```java
+final ProcessRecord startProcessLocked(String processName,
+          ApplicationInfo info, boolean knownToBeDead, int intentFlags,
+          String hostingType, ComponentName hostingName, boolean allowWhileBooting,
+          boolean isolated, boolean keepIfLarge) {
+      return startProcessLocked(processName, info, knownToBeDead, intentFlags, hostingType,
+              hostingName, allowWhileBooting, isolated, 0 /* isolatedUid */, keepIfLarge,
+              null /* ABI override */, null /* entryPoint */, null /* entryPointArgs */,
+              null /* crashHandler */);
+  }
+```
+
+实际上调用另一个同名不同参的startProcessLocked方法,介绍一下参数的含义.
+
+processNam,即将要创建的在这个app进程的名字.传入的要启动的activity:ActivityRecord的processName.在创建ActivityRecord时,其构造方法中惠根据传入的要启动额activity的信息ActivityInfo记录的从清单xml文件中获得的进程名字,没有显示指定的话,默认为app的包名;
+
+info要启动的app的ApplicationInfo,也是通过要启动的activity的ActivityInfo中获取的;
+
+knownToBeDead传入的true;
+
+intentFlags传入的0;
+
+hostingType 传入的"activity";
+
+hostingName 传入的启动这个activity的intent设置的组件名,其实就是:app包名+app主actyivity的类名;
+
+allowWhileBooting 传入的fasle;
+
+isolated传入的false,说明要去检查当前进程列表中是否存在一个同名的进程,有的话复用这个进程.
+
+keepIfLarge传入的false;
+
+接下来的参数是
+
+```java
+final ProcessRecord startProcessLocked(String processName, ApplicationInfo info,
+        boolean knownToBeDead, int intentFlags, String hostingType, ComponentName hostingName,
+        boolean allowWhileBooting, boolean isolated, int isolatedUid, boolean keepIfLarge,
+        String abiOverride, String entryPoint, String[] entryPointArgs, Runnable crashHandler)
+```
+多出来的:
+
+isolatedUid 传入的 0;
+
+abiOverride,entryPoint,entryPointArgs,crashHandler传入的均为null;
+
+分析其代码:
+
+```java
+final ProcessRecord startProcessLocked(String processName, ApplicationInfo info,
+            boolean knownToBeDead, int intentFlags, String hostingType, ComponentName hostingName,
+            boolean allowWhileBooting, boolean isolated, int isolatedUid, boolean keepIfLarge,
+            String abiOverride, String entryPoint, String[] entryPointArgs, Runnable crashHandler) {
+        long startTime = SystemClock.elapsedRealtime();
+        ProcessRecord app;
+  // 传入的fale.那么要检查当前系统中是否存在同名进程,存在的话并不需要重新创建了,复用即可
+  // 但要清除这个已经存在的进程的一些信息,比如crash的次数等.
+  if (!isolated) {
+        app = getProcessRecordLocked(processName, info.uid, keepIfLarge);
+        ....
+    }else{
+      app = null
+    }
+    ........
+  // 这里只考虑 app为null,也就是app进程没有被创建过
+  if (app == null) {
+      checkTime(startTime, "startProcess: creating new process record");
+      app = newProcessRecordLocked(info, processName, isolated, isolatedUid);
+      if (app == null) {
+          Slog.w(TAG, "Failed making new process record for "
+                  + processName + "/" + info.uid + " isolated=" + isolated);
+          return null;
+      }
+      app.crashHandler = crashHandler;
+      checkTime(startTime, "startProcess: done creating new process record");
+  }
+
+  startProcessLocked(app, hostingType, hostingNameStr, abiOverride, entryPoint, entryPointArgs);
+  return (app.pid != 0) ? app : null;
+```
+
+newProcessRecordLocked代码就是创建一个ProcessRecord对象.
+
+```java
+final ProcessRecord newProcessRecordLocked(ApplicationInfo info, String customProcess,
+           boolean isolated, int isolatedUid) {
+       String proc = customProcess != null ? customProcess : info.processName;
+       BatteryStatsImpl stats = mBatteryStatsService.getActiveStatistics();
+       final int userId = UserHandle.getUserId(info.uid);
+       int uid = info.uid;
+       if (isolated) {
+          .........
+       }
+       final ProcessRecord r = new ProcessRecord(stats, info, proc, uid);
+       if (!mBooted && !mBooting
+               && userId == UserHandle.USER_OWNER
+               && (info.flags & PERSISTENT_MASK) == PERSISTENT_MASK) {
+           r.persistent = true;
+       }
+       // 将即将要新创建的进程名字加入到AMS的mProcessNames中
+       addProcessNameLocked(r);
+       return r;
+   }
+```
+ProcessRecord是一个进程在AMS中的代表,也是AMS管理一个进程的数据结构,所以很有必要掌握其关键数据成员.
+
+其构造方法:
+
+```java
+ProcessRecord(BatteryStatsImpl _batteryStats, ApplicationInfo _info,
+        String _processName, int _uid) {
+    mBatteryStats = _batteryStats;
+    info = _info;
+    isolated = _info.uid != _uid;//传入的两者相等,所以为fasle
+    uid = _uid;
+    userId = UserHandle.getUserId(_uid);
+    processName = _processName;
+    pkgList.put(_info.packageName, new ProcessStats.ProcessStateHolder(_info.versionCode));
+    maxAdj = ProcessList.UNKNOWN_ADJ;
+    curRawAdj = setRawAdj = -100;
+    curAdj = setAdj = -100;
+    persistent = false;
+    removed = false;
+    lastStateTime = lastPssTime = nextPssTime = SystemClock.uptimeMillis();
+}
+
+```
+
+### ProcessRecord
+
+源码路径:
+
+```shell
+ Android-6/frameworks/base/services/core/java/com/android/server/am/ProcessRecord.java
+```
+一个APK文件运行时会对应一个进程，当然，多个APK文件也可以运行在同一个进程中。ProcessRecord正是AMS记录一个进程中相关信息的类，该类中内部变量可分为三个部分:
+
+#### 进程文件信息
+
+也就是与该进程对应的APK文件的内部信息.比如:
+
+```java
+ApplicationInfo info;
+
+String processName;
+
+//保存该进程中的所有APK文件包名
+final ArrayMap<String, ProcessStats.ProcessStateHolder> pkgList = new ArrayMap<>();
+```
+
+其中ApplicationInfo类定义节选如下:
+
+```java
+public class ApplicationInfo extends PackageItemInfo implements Parcelable {
+
+
+    public String taskAffinity;// 任务栈名称
+
+    public String permission;
+
+    public String processName;
+
+    public String className;
+    ...........
+    public String sourceDir;
+..................
+   public String[] resourceDirs;
+.....................
+   public String[] sharedLibraryFiles;
+
+   public String dataDir;
+
+   public String nativeLibraryDir;
+   .....................
+
+  public String primaryCpuAbi;
+
+
+  public String secondaryCpuAbi;
+
+  public int uid;
+  .............
+
+  public int targetSdkVersion;
+  public int versionCode;
+```
+
+#### 进程的内存状态信息
+
+这些信息将用于Linux系统的Out Of Memory(OOM)情况的处理，当发生系统内部不够用时，Linux系统会根据进程的内存状态信息，杀掉优先级比较低的进程。
+
+```java
+int maxAdj;
+int curAdj;
+...
+// 是否是被AMS主动杀掉的，而不是因为内存不足而被杀掉
+boolean killedByAm;         // True when proc has been killed by activity manager, not for RAM
+// 是否被杀掉
+boolean killed;             // True once we know the process has been killed
+....
+```
+变量中adj的含义是adjustment，即“调整值”
+
+#### 进程中包含的Activity,Provider,Service等
+
+```java
+// all activities running in the process
+final ArrayList<ActivityRecord> activities = new ArrayList<>();
+// all ServiceRecord running in this process
+final ArraySet<ServiceRecord> services = new ArraySet<>();
+// services that are currently executing code (need to remain foreground).
+final ArraySet<ServiceRecord> executingServices = new ArraySet<>();
+// All ConnectionRecord this process holds
+final ArraySet<ConnectionRecord> connections = new ArraySet<>();
+// all IIntentReceivers that are registered from this process.
+final ArraySet<ReceiverList> receivers = new ArraySet<>();
+// class (String) -> ContentProviderRecord
+final ArrayMap<String, ContentProviderRecord> pubProviders = new ArrayMap<>();
+// All ContentProviderRecord process is using
+final ArrayList<ContentProviderConnection> conProviders = new ArrayList<>();
+```
+
+
+### 接着分析startProcessLocked
+
+```java
+private final void startProcessLocked(
+            ProcessRecord app, //前面创建的ProcessRecord对象
+            String hostingType,// "activity"
+            String hostingNameStr, // "app包名+主activity类名"
+            String abiOverride,// null
+            String entryPoint,// null
+            String[] entryPointArgs)// null
+```
+
+这个方法很重要,代码也比较短,直接分析:
+
+```java
+// 刚启动app时,pid为0,所以不满足条件
+if (app.pid > 0 && app.pid != MY_PID) {
+
+  }
+....
+// mProcessesOnHold记录的是系统为准备好时,就想运行的app,这里因为已经准备好了,所以从这里移除它
+mProcessesOnHold.remove(app);
+//更新cpu状态
+updateCpuStats();
+
+try{
+  ...
+  int uid = app.uid;
+  int[] gids = null;
+  // 该进程使用的外部存储
+  int mountExternal = Zygote.MOUNT_EXTERNAL_NONE;
+  // 通过前面传入ProcessRecord构造方法参数可知,其为false,所以执行
+  if (!app.isolated) {
+    int[] permGids = null;
+    try{
+      // 得到pms
+      final IPackageManager pm = AppGlobals.getPackageManager();
+      // 获取app拥有的权限组
+      permGids = pm.getPackageGids(app.info.packageName, app.userId);  
+      MountServiceInternal mountServiceInternal = LocalServices.getService(
+                           MountServiceInternal.class);
+       mountExternal = mountServiceInternal.getExternalStorageMountMode(uid,
+               app.info.packageName);
+    }catch{
+
+    }
+    /*
+     * Add shared application and profile GIDs so applications can share some
+     * resources like shared libraries and access user-wide resources
+     */
+    if (ArrayUtils.isEmpty(permGids)) {
+        gids = new int[2];
+    } else {
+        gids = new int[permGids.length + 2];
+        System.arraycopy(permGids, 0, gids, 2, permGids.length);
+
+  }
+  gids[0] = UserHandle.getSharedAppGid(UserHandle.getAppId(uid));
+  gids[1] = UserHandle.getUserGid(UserHandle.getUserId(uid));
+
+  // 从ActivityInfo中提取给进程设置的相关标志,zygote创建新城时需要用到
+  int debugFlags = 0;
+  if ((app.info.flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+      debugFlags |= Zygote.DEBUG_ENABLE_DEBUGGER;
+      // Also turn on CheckJNI for debuggable apps. It's quite
+      // awkward to turn on otherwise.
+      debugFlags |= Zygote.DEBUG_ENABLE_CHECKJNI;
+  }
+  // Run the app in safe mode if its manifest requests so or the
+  // system is booted in safe mode.
+  if ((app.info.flags & ApplicationInfo.FLAG_VM_SAFE_MODE) != 0 ||
+      mSafeMode == true) {
+      debugFlags |= Zygote.DEBUG_ENABLE_SAFEMODE;
+  }
+  if ("1".equals(SystemProperties.get("debug.checkjni"))) {
+      debugFlags |= Zygote.DEBUG_ENABLE_CHECKJNI;
+  }
+  String jitDebugProperty = SystemProperties.get("debug.usejit");
+  if ("true".equals(jitDebugProperty)) {
+      debugFlags |= Zygote.DEBUG_ENABLE_JIT;
+  } else if (!"false".equals(jitDebugProperty)) {
+      // If we didn't force disable by setting false, defer to the dalvik vm options.
+      if ("true".equals(SystemProperties.get("dalvik.vm.usejit"))) {
+          debugFlags |= Zygote.DEBUG_ENABLE_JIT;
+      }
+  }
+  String genDebugInfoProperty = SystemProperties.get("debug.generate-debug-info");
+  if ("true".equals(genDebugInfoProperty)) {
+      debugFlags |= Zygote.DEBUG_GENERATE_DEBUG_INFO;
+  }
+  if ("1".equals(SystemProperties.get("debug.jni.logging"))) {
+      debugFlags |= Zygote.DEBUG_ENABLE_JNI_LOGGING;
+  }
+  if ("1".equals(SystemProperties.get("debug.assert"))) {
+      debugFlags |= Zygote.DEBUG_ENABLE_ASSERT;
+  }
+
+  // 提取进行运行时的abi,如:armeabi,armeabi-v7a等
+  // 对于有so库的app来说,PMS会解析除这个变量
+  String requiredAbi = (abiOverride != null) ? abiOverride : app.info.primaryCpuAbi;
+  // 对于没有so库的app来说,设置为系统的主abi
+  if (requiredAbi == null) {
+      requiredAbi = Build.SUPPORTED_ABIS[0];
+  }
+  // 设置进程指令集,如arm,arm64,x86,mips等
+  String instructionSet = null;
+  if (app.info.primaryCpuAbi != null) {
+      instructionSet = VMRuntime.getInstructionSet(app.info.primaryCpuAbi);
+  }
+  // 墙面获取到的信息,填充到ProcessRecord中,
+  app.gids = gids;
+  app.requiredAbi = requiredAbi;
+  app.instructionSet = instructionSet;
+
+  // 设置进程的入口点,也就是执行代码的入口点
+  // 传入的为null,所以为true
+  boolean isActivityProcess = (entryPoint == null);
+  // 设置进程入口点
+  if (entryPoint == null)
+    entryPoint = "android.app.ActivityThread";
+
+		.......
+		// 开始真正的创建进程
+ Process.ProcessStartResult startResult = Process.start(entryPoint,
+                    app.processName, uid, uid, gids, debugFlags, mountExternal,
+                    app.info.targetSdkVersion, app.info.seinfo, requiredAbi, instructionSet,
+                    app.info.dataDir, entryPointArgs);
+// 创建app进程的时候为false
+if (app.isolated) {
+     mBatteryStatsService.addIsolatedUid(app.uid, app.info.uid);
+  }
+
+  // 电源管理
+mBatteryStatsService.noteProcessStart(app.processName, app.info.uid);
+
+// 如果设置该变量为true,表明该进程要一直存在,当被杀死时,要被重新唤醒.所以加入watchdog中
+// 前面在创建这个ProcessRecord时设置的是fasle
+if (app.persistent) {
+		watchdog.getInstance().processStarted(app.processName, startResult.pid);
+    }
+......
+// 继续初始化ProcessRecord,
+app.setPid(startResult.pid);//前面创建进程时,返回了进程号pid
+app.usingWrapper = startResult.usingWrapper;
+app.removed = false;
+app.killed = false;
+app.killedByAm = false;
+
+synchronized (mPidsSelfLocked) {
+this.mPidsSelfLocked.put(startResult.pid, app);
+// 前面设置了该变量为true
+if (isActivityProcess) {
+		// 向AMS发送PROC_START_TIMEOUT_MSG消息
+    Message msg = mHandler.obtainMessage(PROC_START_TIMEOUT_MSG);
+    msg.obj = app;
+    mHandler.sendMessageDelayed(msg, startResult.usingWrapper
+            ? PROC_START_TIMEOUT_WITH_WRAPPER : PROC_START_TIMEOUT);
+}
+}
+```
+
+startProcessLocked()方法的流程是:准备好启动进程的相关参数,例如进程权等,调用Process的start()方法来启动进程.启动进程后,利用返回的信息初始化ProcessRecord,比如拿到进程pid等.
+
+启动进程之后,AMS给自己发送一个PROC_START_TIMEOUT_MSG消息,这个消息用来防止进程启动时间超时.如果start()方法返回结果中usingWrapper为true,超时时间设置为1200秒,否则设置为10秒.如果时间到了进程还没启动AMS将弹出ANR对话框.
+
+![][1]
+
+
+
+### Process.start()方法
+
+源码位置:
+
+```shell
+ Android-6/frameworks/base/core/java/android/os/Process.java
+```
+
+```java
+public static final ProcessStartResult start(
+                              final String processClass,//进程的入口点,android.app.ActivityThread
+                              final String niceName,//进程的名字
+                              int uid, int gid, int[] gids,// 进程uid gid,权限相关
+                              int debugFlags, // app在清单文件中设置的进程相关标记 ,以及系统设置的进程标记,例如是否让VM执行checkjni等
+                              int mountExternal,// 外部存储相关
+                              int targetSdkVersion,// app中指定的targetSdkVersion
+                              String seInfo,//SElinux相关,设置进程安全上下文使用
+                              String abi,//进程abi,如armeabi,armeabi-v7a等
+                              String instructionSet,// 指令集.如arm,arm64,x86,mips等
+                              String appDataDir,//app数据沙箱目录
+                              String[] zygoteArgs //传入的为null
+                              ) {
+    try {
+        return startViaZygote(processClass, niceName, uid, gid, gids,
+                debugFlags, mountExternal, targetSdkVersion, seInfo,
+                abi, instructionSet, appDataDir, zygoteArgs);
+    } catch (ZygoteStartFailedEx ex) {
+        Log.e(LOG_TAG,
+                "Starting VM process through Zygote failed");
+        throw new RuntimeException(
+                "Starting VM process through Zygote failed", ex);
+    }
+}
+```
+在Process类的startViaZygote方法里，会计算启动应用进程用的各个参数，然后再调用zygoteSendArgsAndGetResult方法将这些参数通过socket发送给zygote进程，zygote进程会孵化出新的dalvik应用进程，然后告诉ActivityManagerService新启动的进程的pid。
+
+
+### Process.startViaZygote()方法
+
+```java
+private static ProcessStartResult startViaZygote(final String processClass,
+                              final String niceName,
+                              final int uid, final int gid,
+                              final int[] gids,
+                              int debugFlags, int mountExternal,
+                              int targetSdkVersion,
+                              String seInfo,
+                              String abi,
+                              String instructionSet,
+                              String appDataDir,
+                              String[] extraArgs)
+                              throws ZygoteStartFailedEx {
+    synchronized(Process.class) {
+      ArrayList<String> argsForZygote = new ArrayList<String>();
+      // 开始整理传入的参数
+      argsForZygote.add("--runtime-args");
+      argsForZygote.add("--setuid=" + uid);
+      argsForZygote.add("--setgid=" + gid);
+      if ((debugFlags & Zygote.DEBUG_ENABLE_JNI_LOGGING) != 0) {
+         argsForZygote.add("--enable-jni-logging");
+       }
+      ..........
+
+      if (appDataDir != null) {
+          argsForZygote.add("--app-data-dir=" + appDataDir);
+      }
+      .....
+      argsForZygote.add(processClass);
+      // 传入的为null
+     if (extraArgs != null) {
+         for (String arg : extraArgs) {
+             argsForZygote.add(arg);
+         }
+     }
+     // 将这些参数通过socket发送给zygote进程,用来创建进程
+     return zygoteSendArgsAndGetResult(openZygoteSocketIfNeeded(abi), argsForZygote);
+    }
+```
+
+其中openZygoteSocketIfNeeded()方法用来连接Zygote socket.从Android 5.0开始,Android开始支持64位系统.对于64位Android系统来说,存在两个zygote进程:
+
+1. 主zygote,对应的socket:/dev/socket/zygote
+
+2. 次zygote,对应的scoket:/dev/socket/zygote_secondary
+
+至于主次zygote哪个对应于64位的zygote,哪个是32位的zygote.则有init进程解析相关rc文件决定.
+
+连接zygote时,首先连接主zygote.主次zygote一个是64,一个是32,所以支持的abi肯定不同.根据当前的abi来选择与zygote32还是zygote64来进行通信。
+
+![][2]
+
+openZygoteSocketIfNeeded()方法返回值是ZygoteState对象
+
+```java
+public static class ZygoteState {
+    final LocalSocket socket;
+    final DataInputStream inputStream;
+    final BufferedWriter writer;
+    final List<String> abiList;
+    .......
+```
+
+### Process.zygoteSendArgsAndGetResult()方法
+
+```java
+private static ProcessStartResult zygoteSendArgsAndGetResult(
+            ZygoteState zygoteState, ArrayList<String> args)
+            throws ZygoteStartFailedEx {
+        try {
+            final BufferedWriter writer = zygoteState.writer;
+            final DataInputStream inputStream = zygoteState.inputStream;
+
+            // 先发参数所占字节数大小
+            writer.write(Integer.toString(args.size()));
+            // 开始新的一行(相当于发了"\n")
+            writer.newLine();
+
+            int sz = args.size();
+            for (int i = 0; i < sz; i++) {
+                String arg = args.get(i);
+                if (arg.indexOf('\n') >= 0) {
+                    throw new ZygoteStartFailedEx(
+                            "embedded newlines not allowed");
+                }
+                // 发送一个参数
+                writer.write(arg);
+                // 开始新的一行(相当于发了"\n")
+                writer.newLine();
+            }
+            // 将信息发送给zygote
+            writer.flush();
+
+            ProcessStartResult result = new ProcessStartResult();
+            // 通过socket读取zygote的返回信息(阻塞到有数为止)
+            // zygote先发送创建的进程的pid,为-1表示创建失败
+            result.pid = inputStream.readInt();
+            if (result.pid < 0) {
+                throw new ZygoteStartFailedEx("fork() failed");
+            }
+            // 然后发送的是一个boolean值,于超时间的设定有关
+            result.usingWrapper = inputStream.readBoolean();
+            return result;
+        } catch (IOException ex) {
+            zygoteState.close();
+            throw new ZygoteStartFailedEx(ex);
+        }
+    }
+
+```
+
+### Zygote孵化App进程
+
+zygote进程将ZygoteInit作为启动类，会执行它的main方法，先注册Zygote Socket，然后调用runSelectLoop方法，runSelectLoop方法会调用方法在Zygote Socket上监听请求，如果别的进程通过Zygote Socket请求孵化进程，则孵化进程。
+
+ZygoteInit.main:
+
+```java
+public static void main(String argv[]) {
+    try {
+        runSelectLoop(abiList);
+        ....
+    } catch (MethodAndArgsCaller caller) {
+        caller.run();
+    } catch (RuntimeException ex) {
+        closeServerSocket();
+        throw ex;
+    }
+}
+```
+runSelectLoop()方法会抛出异常MethodAndArgsCaller，从而进入caller.run(),也就是MethodAndArgsCaller.run()方法。
+
+
+### ZygoteInit.runSelectLoop()
+
+这个方法是zygote用来监听和处理创建应用进程的请求.注意此方法是一个死循环!!!通过ZygoteConnection.runOnce()抛出MethodAndArgsCaller异常返回ZygoteInit.main中.
+
+```java
+private static void runSelectLoop(String abiList) throws MethodAndArgsCaller {
+    ArrayList<FileDescriptor> fds = new ArrayList<FileDescriptor>();
+    ArrayList<ZygoteConnection> peers = new ArrayList<ZygoteConnection>();
+
+    // 将 zygote socket 的 fd加入数组
+    fds.add(sServerSocket.getFileDescriptor());
+    peers.add(null);
+
+    // 这里使用到了linux的poll机制
+    while (true) {
+        StructPollfd[] pollFds = new StructPollfd[fds.size()];
+        for (int i = 0; i < pollFds.length; ++i) {
+            pollFds[i] = new StructPollfd();
+            pollFds[i].fd = fds.get(i);
+            pollFds[i].events = (short) POLLIN;
+        }
+        try {
+            Os.poll(pollFds, -1);
+        } catch (ErrnoException ex) {
+            throw new RuntimeException("poll failed", ex);
+        }
+        for (int i = pollFds.length - 1; i >= 0; --i) {
+          //采用I/O多路复用机制，当客户端发出连接请求或者数据处理请求时，跳过continue，执行后面的代码
+            if ((pollFds[i].revents & POLLIN) == 0) {
+                continue;
+            }
+            if (i == 0) {
+                //表示zygote socket中有连接到来,那么就要创建客户端连接
+                // 实际上就是执行socket accept操作
+                // 然后把创建的这个连接也加入到监听数组中,索引肯定大于0了
+                // 那么一旦这个连接中有数据来了,i肯定大于0
+                ZygoteConnection newPeer = acceptCommandPeer(abiList);
+                peers.add(newPeer);
+                fds.add(newPeer.getFileDesciptor());
+            } else {
+                //调用ZygoteConnection.runOnce()处理客户端数据事务
+                boolean done = peers.get(i).runOnce();
+                // 处理完之后,断开连接,并且不在监听这个连接
+                if (done) {
+                    peers.remove(i);
+                    fds.remove(i);
+                }
+            }
+        }
+    }
+}
+```
+
+### ZygoteConnection.runOnce()
+
+这个方法首先肯定是先从 socket接受传递过来的启动进程的线骨干参数.然后解析参数.检查权限,创建进程,然后处理父子进程:
+
+```java
+ boolean runOnce() throws ZygoteInit.MethodAndArgsCaller {
+   String args[];
+   Arguments parsedArgs = null;
+   FileDescriptor[] descriptors;
+
+   try {
+     //接受参数
+       args = readArgumentList();
+       descriptors = mSocket.getAncillaryFileDescriptors();
+   } catch (IOException ex) {
+      ........................
+   }
+   .......
+   try {
+      // 解析参数
+      parsedArgs = new Arguments(args);
+      .......
+      // 权限检查
+      applyUidSecurityPolicy(parsedArgs, peer);
+      applyInvokeWithSecurityPolicy(parsedArgs, peer);
+      applyDebuggerSystemProperty(parsedArgs);
+      applyInvokeWithSystemProperty(parsedArgs);
+      .....
+      pid = Zygote.forkAndSpecialize(parsedArgs.uid, parsedArgs.gid, parsedArgs.gids,
+                   parsedArgs.debugFlags, rlimits, parsedArgs.mountExternal, parsedArgs.seInfo,
+                   parsedArgs.niceName, fdsToClose, parsedArgs.instructionSet,
+                   parsedArgs.appDataDir);
+    }catch{
+      ......
+    }
+    try {
+        if (pid == 0) {
+            // in child
+            // 创建的app进程
+            IoUtils.closeQuietly(serverPipeFd);
+            serverPipeFd = null;
+            handleChildProc(parsedArgs, descriptors, childPipeFd, newStderr);
+            // should never get here, the child is expected to either
+            // throw ZygoteInit.MethodAndArgsCaller or exec().
+            return true;
+        } else {
+            // in parent...pid of < 0 means failure
+            // zygote进程
+            IoUtils.closeQuietly(childPipeFd);
+            childPipeFd = null;
+            return handleParentProc(pid, descriptors, serverPipeFd, parsedArgs);
+        }
+    } finally {
+        IoUtils.closeQuietly(childPipeFd);
+        IoUtils.closeQuietly(serverPipeFd);
+    }
+
+ }
+```
+
+### Zygote.forkAndSpecialize()方法
+
+```java
+public static int forkAndSpecialize(int uid, int gid, int[] gids, int debugFlags,
+      int[][] rlimits, int mountExternal, String seInfo, String niceName, int[] fdsToClose,
+      String instructionSet, String appDataDir) {
+    VM_HOOKS.preFork();
+    int pid = nativeForkAndSpecialize(
+              uid, gid, gids, debugFlags, rlimits, mountExternal, seInfo, niceName, fdsToClose,
+              instructionSet, appDataDir);
+    // Enable tracing as soon as possible for the child process.
+    if (pid == 0) {
+        Trace.setTracingEnabled(true);
+
+        // Note that this event ends at the end of handleChildProc,
+        Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "PostFork");
+    }
+    VM_HOOKS.postForkCommon();
+    return pid;
+}
+```
+
+从代码中可知zygote孵化进程还是依靠的jni native方法完成的.
+
+在真正孵化进程之前,要做一些前期工作,比如暂停zygote中运行的线程,从而提高fork效率.这些是由VM_HOOKS.preFork()完成的.
+
+```java
+public void preFork() {
+    Daemons.stop();//停止4个Daemon子线程
+    waitUntilAllThreadsStopped();//等待所有子线程结束
+    token = nativePreFork();//完成gc堆的初始化工作
+}
+public static void stop() {
+    HeapTaskDaemon.INSTANCE.stop(); //Java堆整理线程
+    ReferenceQueueDaemon.INSTANCE.stop(); //引用队列线程
+    FinalizerDaemon.INSTANCE.stop(); //析构线程
+    FinalizerWatchdogDaemon.INSTANCE.stop(); //析构监控线程
+}
+```
+守护线程Stop方式是先调用目标线程interrrupt()方法，然后再调用目标线程join()方法，等待线程执行完成.
+
+### Zygote.nativeForkAndSpecialize()方法
+
+源码路径:
+
+```shell
+Android-6/frameworks/base/core/jni/com_android_internal_os_Zygote.cpp
+```
+
+```c++
+static jint com_android_internal_os_Zygote_nativeForkAndSpecialize(
+        JNIEnv* env, jclass, jint uid, jint gid, jintArray gids,
+        jint debug_flags, jobjectArray rlimits,
+        jint mount_external, jstring se_info, jstring se_name,
+        jintArray fdsToClose, jstring instructionSet, jstring appDataDir) {
+    // Grant CAP_WAKE_ALARM to the Bluetooth process.
+    jlong capabilities = 0;
+    if (uid == AID_BLUETOOTH) {
+        capabilities |= (1LL << CAP_WAKE_ALARM);
+    }
+
+    return ForkAndSpecializeCommon(env, uid, gid, gids, debug_flags,
+            rlimits, capabilities, capabilities, mount_external, se_info,
+            se_name, false, fdsToClose, instructionSet, appDataDir);
+}
+```
+
+实际上调用下面的方法创建进程:
+
+```c++
+static pid_t ForkAndSpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray javaGids,
+                                     jint debug_flags, jobjectArray javaRlimits,
+                                     jlong permittedCapabilities, jlong effectiveCapabilities,
+                                     jint mount_external,
+                                     jstring java_se_info, jstring java_se_name,
+                                     bool is_system_server, jintArray fdsToClose,
+                                     jstring instructionSet, jstring dataDir) {
+  //设置子进程的signal信号处理函数
+  SetSigChldHandler();
+  // fork进程
+  // 父进程中，fork返回新创建的子进程的pid;
+  // 子进程中，fork返回0
+  // 执行完这句代码,后面的代码父子进程都会执行,所以要根据返回值做不同处理.
+  pid_t pid = fork();
+
+  if (pid == 0) {
+    // app进程
+    gMallocLeakZygoteChild = 1;
+    DetachDescriptors(env, fdsToClose);
+
+    // Keep capabilities across UID change, unless we're staying root.
+    // 使用linux capabilities 权限机制,root进程不使用
+    if (uid != 0) {
+      EnableKeepCapabilities(env);
+    }
+    // 由于前面开始了capabilities机制,所以可以放弃某些app进程不该拥有的能力了
+    DropCapabilitiesBoundingSet(env);
+
+    // x86架构运行arm文件时,需要一个bridge
+    bool use_native_bridge = !is_system_server && (instructionSet != NULL)
+        && android::NativeBridgeAvailable();
+    if (use_native_bridge) {
+      ScopedUtfChars isa_string(env, instructionSet);
+      use_native_bridge = android::NeedsNativeBridge(isa_string.c_str());
+    }
+    if (use_native_bridge && dataDir == NULL) {
+      use_native_bridge = false;
+      ALOGW("Native bridge will not be used because dataDir == NULL.");
+    }
+    // 进程外置外部存储
+    // 6.0中,因为允许动态授权权限,比如说app申请了对外部存储的读写权限,可能用户之后会关闭写权限等
+    // 所以6.0中,改变了对外部存储的管理策略,这个以后单独讲
+    // 这里只需要直到根据mount_external
+    // 有三个挂在点:/mnt/runtime/default,storageSource = "/mnt/runtime/read",storageSource = "/mnt/runtime/write"
+    // 6.0之前,都是直接指向外部存储的
+    if (!MountEmulatedStorage(uid, mount_external, use_native_bridge)) {
+      ALOGW("Failed to mount emulated storage: %s", strerror(errno));
+      if (errno == ENOTCONN || errno == EROFS) {
+      } else {
+        ALOGE("Cannot continue without emulated storage");
+        RuntimeAbort(env);
+      }
+    }
+
+    if (!is_system_server) {
+       //对于非system_server子进程，则创建进程组
+       // 创建文件夹/acct/uid_<uid>/,权限0750,system:system
+       // 创建文件夹/acct/uid_<uid>/pid_<pid>,权限0750,system:system
+       // open文件/acct/uid_<uid>/pid_<pid>/cgroup.procs,记录进程号
+        int rc = createProcessGroup(uid, getpid());
+        if (rc != 0) {
+          .......................
+        }
+    }
+    //设置设置group
+    SetGids(env, javaGids);
+    //设置资源limit
+    SetRLimits(env, javaRlimits);
+
+    if (use_native_bridge) {
+      ScopedUtfChars isa_string(env, instructionSet);
+      ScopedUtfChars data_dir(env, dataDir);
+      android::PreInitializeNativeBridge(data_dir.c_str(), isa_string.c_str());
+    }
+
+    int rc = setresgid(gid, gid, gid);
+    if (rc == -1) {
+      ALOGE("setresgid(%d) failed: %s", gid, strerror(errno));
+      RuntimeAbort(env);
+    }
+
+    rc = setresuid(uid, uid, uid);
+    if (rc == -1) {
+      ALOGE("setresuid(%d) failed: %s", uid, strerror(errno));
+      RuntimeAbort(env);
+    }
+
+    if (NeedsNoRandomizeWorkaround()) {
+        // Work around ARM kernel ASLR lossage (http://b/5817320).
+        int old_personality = personality(0xffffffff);
+        int new_personality = personality(old_personality | ADDR_NO_RANDOMIZE);
+        if (new_personality == -1) {
+            ALOGW("personality(%d) failed: %s", new_personality, strerror(errno));
+        }
+    }
+    // 设置能力,除了蓝颜进程外,其他app进程,permittedCapabilities为0
+    SetCapabilities(env, permittedCapabilities, effectiveCapabilities);
+    //设置调度策略
+    SetSchedulerPolicy(env);
+
+    const char* se_info_c_str = NULL;
+    // PMS在app安装的时候,就会记录seinfo.第三方app一般都为default.
+    ScopedUtfChars* se_info = NULL;
+    if (java_se_info != NULL) {
+        se_info = new ScopedUtfChars(env, java_se_info);
+        se_info_c_str = se_info->c_str();
+        if (se_info_c_str == NULL) {
+          ALOGE("se_info_c_str == NULL");
+          RuntimeAbort(env);
+        }
+    }
+    const char* se_name_c_str = NULL;
+    ScopedUtfChars* se_name = NULL;
+    if (java_se_name != NULL) {
+        se_name = new ScopedUtfChars(env, java_se_name);
+        se_name_c_str = se_name->c_str();
+        if (se_name_c_str == NULL) {
+          ALOGE("se_name_c_str == NULL");
+          RuntimeAbort(env);
+        }
+    }
+    //设置selinux上下文
+    rc = selinux_android_setcontext(uid, is_system_server, se_info_c_str, se_name_c_str);
+    if (rc == -1) {
+      ALOGE("selinux_android_setcontext(%d, %d, \"%s\", \"%s\") failed", uid,
+            is_system_server, se_info_c_str, se_name_c_str);
+      RuntimeAbort(env);
+    }
+
+    // Make it easier to debug audit logs by setting the main thread's name to the
+    // nice name rather than "app_process".
+    if (se_info_c_str == NULL && is_system_server) {
+      se_name_c_str = "system_server";
+    }
+    // 第三方app为default
+    if (se_info_c_str != NULL) {
+      SetThreadName(se_name_c_str);
+    }
+
+    delete se_info;
+    delete se_name;
+   //在Zygote子进程中，设置信号SIGCHLD的处理器恢复为默认行为
+    UnsetSigChldHandler();
+    //调用zygote.callPostForkChildHooks()
+    env->CallStaticVoidMethod(gZygoteClass, gCallPostForkChildHooks, debug_flags,
+                              is_system_server ? NULL : instructionSet);
+    if (env->ExceptionCheck()) {
+      ALOGE("Error calling post fork hooks.");
+      RuntimeAbort(env);
+    }
+  } else if (pid > 0) {
+    // the parent process
+  }
+  return pid;
+}
+
+```
+
+```java
+
+private static void callPostForkChildHooks(int debugFlags, String instructionSet) {
+      VM_HOOKS.postForkChild(debugFlags, instructionSet);
+  }
+  public void postForkChild(int debugFlags, String instructionSet) {
+    nativePostForkChild(token, debugFlags, instructionSet);
+    Math.setRandomSeedInternal(System.currentTimeMillis());
+}
+```
+
+```c++
+static void ZygoteHooks_nativePostForkChild(JNIEnv* env, jclass, jlong token, jint debug_flags,
+                                            jstring instruction_set) {
+    Thread* thread = reinterpret_cast<Thread*>(token);
+    //设置新进程的主线程id
+    thread->InitAfterFork();
+    ..
+    if (instruction_set != nullptr) {
+      ScopedUtfChars isa_string(env, instruction_set);
+      InstructionSet isa = GetInstructionSetFromString(isa_string.c_str());
+      Runtime::NativeBridgeAction action = Runtime::NativeBridgeAction::kUnload;
+      if (isa != kNone && isa != kRuntimeISA) {
+        action = Runtime::NativeBridgeAction::kInitialize;
+      }
+      //【见流程6-2-2-1-1-1】
+      Runtime::Current()->DidForkFromZygote(env, action, isa_string.c_str());
+    } else {
+      Runtime::Current()->DidForkFromZygote(env, Runtime::NativeBridgeAction::kUnload, nullptr);
+    }
+}
+```
+
+```c++
+void Runtime::DidForkFromZygote(JNIEnv* env, NativeBridgeAction action, const char* isa) {
+  is_zygote_ = false;
+  if (is_native_bridge_loaded_) {
+    switch (action) {
+      case NativeBridgeAction::kUnload:
+        UnloadNativeBridge(); //卸载用于跨平台的桥连库
+        is_native_bridge_loaded_ = false;
+        break;
+      case NativeBridgeAction::kInitialize:
+        InitializeNativeBridge(env, isa);//初始化用于跨平台的桥连库
+        break;
+    }
+  }
+  //创建Java堆处理的线程池
+  heap_->CreateThreadPool();
+  //重置gc性能数据，以保证进程在创建之前的GCs不会计算到当前app上。
+  heap_->ResetGcPerformanceInfo();
+  if (jit_.get() == nullptr && jit_options_->UseJIT()) {
+    //当flag被设置，并且还没有创建JIT时，则创建JIT
+    CreateJit();
+  }
+  //设置信号处理函数
+  StartSignalCatcher();
+  //启动JDWP线程，当命令debuger的flags指定"suspend=y"时，则暂停runtime
+  Dbg::StartJdwp();
+}
+```
+
+### 继续看Zygote.forkAndSpecialize()
+
+会调用:
+```java
+VM_HOOKS.postForkCommon();
+```
+
+```java
+public void postForkCommon() {
+    Daemons.start();
+}
+public static void start() {
+    ReferenceQueueDaemon.INSTANCE.start();
+    FinalizerDaemon.INSTANCE.start();
+    FinalizerWatchdogDaemon.INSTANCE.start();
+    HeapTaskDaemon.INSTANCE.start();
+}
+```
+
+VM_HOOKS.postForkCommon的主要功能是在fork新进程后，启动Zygote的4个Daemon线程，java堆整理，引用队列，以及析构线程(前面暂停了)。
+
+![][3]
+
+
+### ZygoteConnection.handleChildProc()--子进程初始化
+
+```java
+private void handleChildProc(Arguments parsedArgs,
+        FileDescriptor[] descriptors, FileDescriptor pipeFd, PrintStream newStderr)
+        throws ZygoteInit.MethodAndArgsCaller {
+
+    //关闭Zygote的socket两端的连接
+    closeSocket();
+    ZygoteInit.closeServerSocket();
+    // 关闭从zygote继承的文件描述
+    if (descriptors != null) {
+        try {
+            Os.dup2(descriptors[0], STDIN_FILENO);
+            Os.dup2(descriptors[1], STDOUT_FILENO);
+            Os.dup2(descriptors[2], STDERR_FILENO);
+            for (FileDescriptor fd: descriptors) {
+                IoUtils.closeQuietly(fd);
+            }
+            newStderr = System.err;
+        } catch (ErrnoException ex) {
+            Log.e(TAG, "Error reopening stdio", ex);
+        }
+    }
+
+    if (parsedArgs.niceName != null) {
+        //设置进程名
+        Process.setArgV0(parsedArgs.niceName);
+    }
+
+    if (parsedArgs.invokeWith != null) {
+      ...........................
+    } else {
+        //执行ActivityThread.main
+        RuntimeInit.zygoteInit(parsedArgs.targetSdkVersion,
+                parsedArgs.remainingArgs, null);
+    }
+}
+```
+
+### RuntimeInit.ZygoteInit()方法
+
+
+```java
+public static final void zygoteInit(int targetSdkVersion, String[] argv, ClassLoader classLoader)
+        throws ZygoteInit.MethodAndArgsCaller {
+    if (DEBUG) Slog.d(TAG, "RuntimeInit: Starting application from zygote");
+
+    Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "RuntimeInit");
+    //重定向log输出
+    redirectLogStreams();
+    //一些初始化
+    commonInit();
+    // zygote初始化
+    nativeZygoteInit();
+    // 应用初始化
+    applicationInit(targetSdkVersion, argv, classLoader);
+}
+```
+
+
+### RuntimeInit.commonInit()方法
+
+commonInit()方法主要进行一些简单初始化:设置异常处理,设置时区,重置Android log 系统,设置http.agent属性
+
+```java
+private static final void commonInit() {
+    // 设置默认的未捕捉异常处理方法
+    // app也可以调用这个方法设置自己的处理方法,例如在处理方法中把产生的异常信息发送到公司服务器中
+    Thread.setDefaultUncaughtExceptionHandler(new UncaughtHandler());
+
+    // 设置市区，中国时区为"Asia/Shanghai"
+    TimezoneGetter.setInstance(new TimezoneGetter() {
+        @Override
+        public String getId() {
+            return SystemProperties.get("persist.sys.timezone");
+        }
+    });
+    TimeZone.setDefault(null);
+
+    //重置log配置
+    LogManager.getLogManager().reset();
+    new AndroidConfig();
+
+    // 设置默认的HTTP User-agent格式,用于 HttpURLConnection。
+    String userAgent = getDefaultUserAgent();
+    System.setProperty("http.agent", userAgent);
+
+    // 设置socket的tag，用于网络流量统计
+    NetworkManagementSocketTagger.install();
+}
+```
+
+### RuntimeInit.nativeZygoteInit()方法
+
+源码路径:
+
+```shell
+ Android-6/frameworks/base/core/jni/AndroidRuntime.cpp
+ Android-6/frameworks/base/cmds/app_process/App_main.cpp
+```
+
+```c++
+static void com_android_internal_os_RuntimeInit_nativeZygoteInit(JNIEnv* env, jobject clazz)
+{
+    gCurRuntime->onZygoteInit(); //此处的gCurRuntime为AppRuntime，是在AndroidRuntime.cpp中定义的
+}
+virtual void onZygoteInit()
+{
+    sp<ProcessState> proc = ProcessState::self();
+    proc->startThreadPool(); //启动新binder线程
+}
+```
+ProcessState::self()是单例模式，主要工作是调用open()打开/dev/binder驱动设备，再利用mmap()映射内核的地址空间，将Binder驱动的fd赋值ProcessState对象中的变量mDriverFD，用于交互操作。startThreadPool()是创建一个新的binder线程，不断进行talkWithDriver().
+
+该方法主要进行binder的初始化,这样app就可以使用binder了.
+
+### RuntimeInit.applicationInit()方法
+
+开始指向ActivityThread.main().
+
+```java
+private static void applicationInit(int targetSdkVersion, String[] argv, ClassLoader classLoader)
+          throws ZygoteInit.MethodAndArgsCaller {
+      //true代表应用程序退出时不调用AppRuntime.onExit()，否则会在退出前调用
+      nativeSetExitWithoutCleanup(true);
+      //设置虚拟机的内存利用率参数值为0.75
+      VMRuntime.getRuntime().setTargetHeapUtilization(0.75f);
+      VMRuntime.getRuntime().setTargetSdkVersion(targetSdkVersion);
+
+      final Arguments args;
+      try {
+          args = new Arguments(argv);
+      } catch (IllegalArgumentException ex) {
+          Slog.e(TAG, ex.getMessage());
+          // let the process exit
+          return;
+      }
+
+      // Remaining arguments are passed to the start class's static main
+      invokeStaticMain(args.startClass, args.startArgs, classLoader);
+  }
+```
+
+### RuntimeInit.invokeStaticMain()方法
+
+```java
+private static void invokeStaticMain(String className, String[] argv, ClassLoader classLoader)
+        throws ZygoteInit.MethodAndArgsCaller {
+    Class<?> cl;
+
+    try {
+        // 传入的classLoader为null
+        cl = Class.forName(className, true, classLoader);
+    } catch (ClassNotFoundException ex) {
+        throw new RuntimeException(
+                "Missing class when invoking static main " + className, ex);
+    }
+    // 找到main方法
+    Method m;
+    try {
+        m = cl.getMethod("main", new Class[] { String[].class });
+    } catch (NoSuchMethodException ex) {
+        throw new RuntimeException( "Missing static main on " + className, ex);
+    } catch (SecurityException ex) {
+        throw new RuntimeException(
+                "Problem getting static main on " + className, ex);
+    }
+    // main方法必须是static public类型的
+    int modifiers = m.getModifiers();
+    if (! (Modifier.isStatic(modifiers) && Modifier.isPublic(modifiers))) {
+        throw new RuntimeException(
+                "Main method is not public and static on " + className);
+    }
+
+    //通过抛出异常，回到ZygoteInit.main()。这样做好处是能清空栈帧，提高栈帧利用率。
+    // m就是找到的main方法
+    throw new ZygoteInit.MethodAndArgsCaller(m, argv);
+}
+```
+### MethodAndArgsCaller.run()方法
+
+```java
+public void run() {
+            try {
+                // mMethod就是ActivityThread.main方法
+                mMethod.invoke(null, new Object[] { mArgs });
+            } catch (IllegalAccessException ex) {
+                throw new RuntimeException(ex);
+            } catch (InvocationTargetException ex) {
+                Throwable cause = ex.getCause();
+                if (cause instanceof RuntimeException) {
+                    throw (RuntimeException) cause;
+                } else if (cause instanceof Error) {
+                    throw (Error) cause;
+                }
+                throw new RuntimeException(ex);
+            }
+        }
+```
+
+![][4]
+
+
+到此位置app的进程算是创建完毕了,进程执行的第一个方法也找到是谁了.
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-17.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-18.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-19.png
+[4]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-20.png

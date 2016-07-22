@@ -1,0 +1,1174 @@
+---
+layout: post
+title: Android6.0之AMS如何启动app中篇之Task的管理
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-07-11 19:21:53
+
+---
+
+前面分析到了ActivityStackSupervisor类中的startActivityLocked方法,现在接着分析.
+
+<!--more-->
+
+### startActivityLocked
+
+利用传入的IApplicationThread caller,从AMS中得到调用者进程信息,也就是Launcher进程的信息.
+```java
+final int startActivityLocked(
+           IApplicationThread caller,//AMS通过这个参数可以和发起者进行交互
+           Intent intent,// 启动activity的intent
+           String resolvedType, // intent的类型,也就是MIME type
+           ActivityInfo aInfo,//要启动的activity的信息
+           IVoiceInteractionSession voiceSession,
+           IVoiceInteractor voiceInteractor,
+           IBinder resultTo,//用于接收startActivityForResult的结果,launcher启动app这种情景下没有用,为null
+           String resultWho,
+           int requestCode,// 传入的-1
+           int callingPid,
+           int callingUid,
+           String callingPackage,
+           int realCallingPid,
+           int realCallingUid,
+           int startFlags,// 传入的为0
+           Bundle options,
+           boolean ignoreTargetSecurity, boolean componentSpecified, ActivityRecord[] outActivity,
+           ActivityContainer container, // 启动app时,传入的为null
+           TaskRecord inTask) // 启动app时,传入为null
+{
+       int err = ActivityManager.START_SUCCESS;
+
+       ProcessRecord callerApp = null;
+       if (caller != null) {
+           callerApp = mService.getRecordForAppLocked(caller);
+          ................
+       }
+```
+这里顺便简单的对startActivityLocked方法的几个关键的参数根据代码做一个解释。
+IApplicationThread caller :请求启动当前Activity的应用方，IApplicationThread 类型是AMS IPC调用ActivityThread的IBinder接口,如下图所示:
+![][2]
+
+ IBinder resultTo: 调用方Activity的ActivityRecord，每个Activity在启动之后，AMS均会将这个Activity的ActivityRecord的IBinder再传递给Activity，作为其在AMS中的标识。因此此时的resultTo经过2次IPC传递之后，已经不再是接口了，回到AMS之后就会再次变为ActivityRecord。这个参数后面会详解.
+
+ callingPid和callingUid: 如果caller为空，其为请求启动Activity的进程的PID和UID；caller不为空，为caller activity所在的进程的PID和UID，基本上是一码事。这个PID和UID为了权限检查用的，检查当前的请求方是否有权限启动这个Activity。
+
+#### 接着从intent中拿到启动activity的flag.
+
+```java
+ActivityRecord sourceRecord = null;
+ActivityRecord resultRecord = null;
+// 启动app时,传入为null
+if (resultTo != null) {
+    sourceRecord = isInAnyStackLocked(resultTo);
+    if (DEBUG_RESULTS) Slog.v(TAG_RESULTS,
+            "Will send result to " + resultTo + " " + sourceRecord);
+    if (sourceRecord != null) {
+        if (requestCode >= 0 && !sourceRecord.finishing) {
+            resultRecord = sourceRecord;
+        }
+    }
+}
+// 从intent中拿到启动activity的flag
+final int launchFlags = intent.getFlags();
+//因为sourceRecord为null,所以不走这段代码
+if ((launchFlags & Intent.FLAG_ACTIVITY_FORWARD_RESULT) != 0 && sourceRecord != null) {
+}
+```
+这里还要确定sourceRecord和resultRecord,这两个变量均为ActivityRecord类型，前者代表请求启动当前activity的activity；后者表示当前的activity在启动之后需要返回结果的ActivityRecord，一般情况下，如果sourceRecord的activity使用startActivityForResult()启动当前activity并且requestCode>=0时，则resultRecord不为空，且resultRecord=sourceRecord。
+
+只不过当从launcher启动app时,requestCode为-1.
+
+还有一种特殊的情况，当启动一个activity时，启动的Intent设置了Intent.FLAG_ACTIVITY_FORWARD_RESULT标志，在这种情况resultRecord并不指向sourceRecord，而是指向sourceRecord的sourceRecord.
+
+如下图所示:
+![][3]
+
+Activity A 启动了Activity B，Activity B又启动了C，A-->B-->C, 这种情况下，A启动B要求B返回result给A，但是如果B在启动C时，Intent设置了Intent.FLAG_ACTIVITY_FORWARD_RESULT标志，那么此时将会交由C向A setResult。为了避免冲突，B启动C时不得指定resultRecord>=0。
+
+
+
+#### 接着是检查权限:
+
+```java
+final int startAnyPerm = mService.checkPermission(
+    START_ANY_ACTIVITY, callingPid, callingUid);
+```
+
+检查权限的规则:
+
+1. Root uid(0), System Server uid (Process.SYSTEM_UID), own process(MY_PID),将授权permission
+
+2. 如果发起者是被隔离的app,那么拒绝授权permission
+
+3. 如果请求启动的activity的属性android:exported=false， 并且请求的callingUid不等于请求启动的activity的UID，不允许启动；
+
+4. 请求启动的activity没有设定permission，只有当activity的permission和其所在的application的android:permission均没有设置时才为null，设置了application未设置activity，那么activity的permission与application相同。activity的permission为空，将授权permission
+
+5. 请求启动的activity设定了permission，那么检查请求方的activity中是否声明了使用这个permission，如果声明，授权。
+
+intent防火墙规则检查,看是否防火墙屏蔽了启动这个app的intent:
+
+```java
+abort |= !mService.mIntentFirewall.checkStartActivity(intent, callingUid,
+                callingPid, resolvedType, aInfo.applicationInfo);
+```
+防火墙规则目录在
+
+```shell
+/data/system/ifw
+```
+这个文件夹中,可以设置系统禁止某些intent.
+
+
+接着将Activity启动的消息通知监听Activity变动的的接口IActivityController,AMS有任何动静都将回调该监听者.
+
+```java
+if (mService.mController != null) {
+          try {
+              // The Intent we give to the watcher has the extra data
+              // stripped off, since it can contain private information.
+              Intent watchIntent = intent.cloneFilter();
+              abort |= !mService.mController.activityStarting(watchIntent,
+                      aInfo.applicationInfo.packageName);
+          } catch (RemoteException e) {
+              mService.mController = null;
+          }
+      }
+```
+一般情况下是不会设置这个监听者的,只有当debug时才会设置.例如在进行Monkey测试的时候，Monkey会设置该回调对象。这样，Monkey就能根据AMS反馈的情况进行相应处理了.
+
+#### 接着是为启动的App的主activity创建ActivityRecord对象:
+
+```java
+ActivityRecord r = new ActivityRecord(mService, callerApp, callingUid, callingPackage,
+             intent, resolvedType, aInfo, mService.mConfiguration, resultRecord, resultWho,
+             requestCode, componentSpecified, voiceSession != null, this, container, options);
+```
+
+#### 接着是获取恰当的ActivityStack:
+
+```java
+   final ActivityStack stack = mFocusedStack;
+```
+其中mFocusedStack前面已经介绍了,也是ActivityStackSupervisor类中的定义的:
+```java
+/** The stack currently receiving input or launching the next activity. */
+private ActivityStack mFocusedStack;
+```
+
+#### 接着检查启动activity是否会引起进程切换，如果需要的话，还要检查Android系统目前是否允许切换。
+
+```java
+final ActivityStack stack = mFocusedStack;
+     if (voiceSession == null && (stack.mResumedActivity == null
+             || stack.mResumedActivity.info.applicationInfo.uid != callingUid)) {
+         if (!mService.checkAppSwitchAllowedLocked(callingPid, callingUid,
+                 realCallingPid, realCallingUid, "Activity start")) {
+             PendingActivityLaunch pal =
+                     new PendingActivityLaunch(r, sourceRecord, startFlags, stack);
+             mPendingActivityLaunches.add(pal);
+             ActivityOptions.abort(options);
+             return ActivityManager.START_SWITCHES_CANCELED;
+         }
+     }
+
+```
+
+什么情况不允许切换呢？最常见的例子就是打电话的时候，如果是位于通话界面的话，可以通过AMS的stopAppSwitches来禁止切换掉当前进程，这个方法会使其他Task的Activity无法显示在前端，但同一个Task中的Activity则不受制约.电话结束后再调用resumeAppSwitches来恢复切换。为了防止使用者不调用resumeAppSwitches，系统设置了一个超时时间（5s），超时则自动resume。需要注意的是，这个接口一般的普通的app是不能调用的，因此这个操作一定是系统app操作的。
+
+如果没有则储存起来，有机会再启动它。将保存到mPendingActivityLaunchers中.
+
+如果允许进程切换的话:
+
+```java
+  doPendingActivityLaunchesLocked(false);
+```
+启动处于Pending状态的Activity，即之前由于上一步被禁止切换而保存起来的请求。它将先于本次需要启动的Activity处理.
+
+然后再调用startActivityUncheckedLocked方法继续处理当前方法继续处理当前的activity。(其实处理Pending状态的Activity,也是调用startActivityUncheckedLocked方法)
+
+```java
+err = startActivityUncheckedLocked(r, sourceRecord, voiceSession, voiceInteractor,
+              startFlags, true, options, inTask);
+```
+
+整个startActivityLocked方法主要调用时序图如下所示:
+
+![][1]
+
+### startActivityUncheckedLocked
+
+接下来分析startActivityUncheckedLocked,这个方法代码很长,分为若干阶段. 该方法主要负责task的管理,也可以理解为task的调度.在换句话说,也可以理解为找到或者创建一个合适的task.
+
+先分析参数:
+
+```java
+final int startActivityUncheckedLocked(
+        final ActivityRecord r,// 创建的activity
+         ActivityRecord sourceRecord, // 启动方
+        IVoiceInteractionSession voiceSession,
+        IVoiceInteractor voiceInteractor,
+         int startFlags,//
+        boolean doResume,// 传入的true
+         Bundle options,
+          TaskRecord inTask // 在最近任务列表中的task,没有的话 为null
+          )
+```
+
+
+获取Activity的启动模式,这些都是PMS从AndroidManifest.xml文件中获取的.
+
+```java
+final boolean launchSingleTop = r.launchMode == ActivityInfo.LAUNCH_SINGLE_TOP;
+final boolean launchSingleInstance = r.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE;
+final boolean launchSingleTask = r.launchMode == ActivityInfo.LAUNCH_SINGLE_TASK;
+```
+
+接着获取启动Activity的flag:
+
+```java
+  int launchFlags = intent.getFlags();
+```
+
+然后就开始依据flag进行相应的处理,例如是否需要创建新的task等等.
+
+首先处理AndroidManifest.xml和intent flag冲突的问题.
+
+```java
+//launchSingleInstance与launchSingleTask都是从AndroidManifest.xml文件中获取的
+if ((launchFlags & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0 &&
+                (launchSingleInstance || launchSingleTask)) {
+            // We have a conflict between the Intent and the Activity manifest, manifest wins.
+            Slog.i(TAG, "Ignoring FLAG_ACTIVITY_NEW_DOCUMENT, launchMode is " +
+                    "\"singleInstance\" or \"singleTask\"");
+            // 当flag中包含FLAG_ACTIVITY_NEW_DOCUMENT,而activity启动模式为SingleInstance或者SingleTask时,
+            // 这个标志包括FLAG_ACTIVITY_MULTIPLE_TASK会被忽略.
+            launchFlags &=
+                    ~(Intent.FLAG_ACTIVITY_NEW_DOCUMENT | Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+        } else {
+           // 如果AndroidManifest.xml设置了documentLaunchMode
+           // 那么依据此来修改flag.
+            switch (r.info.documentLaunchMode) {
+                case ActivityInfo.DOCUMENT_LAUNCH_NONE:
+                    break;
+                case ActivityInfo.DOCUMENT_LAUNCH_INTO_EXISTING:
+                    launchFlags |= Intent.FLAG_ACTIVITY_NEW_DOCUMENT;
+                    break;
+                case ActivityInfo.DOCUMENT_LAUNCH_ALWAYS:
+                    launchFlags |= Intent.FLAG_ACTIVITY_NEW_DOCUMENT;
+                    break;
+                case ActivityInfo.DOCUMENT_LAUNCH_NEVER:
+                    launchFlags &= ~Intent.FLAG_ACTIVITY_MULTIPLE_TASK;
+                    break;
+            }
+        }
+```
+通过以上代码可知,AndroidManifest.xml设置的documentLaunchMode标签属性优先级高于flag.
+
+
+接下来处理当flag中设置Intent.FLAG_ACTIVITY_NEW_TASK时断开与Caller依赖
+
+```java
+if (r.resultTo != null && (launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0
+               && r.resultTo.task.stack != null) {
+           Slog.w(TAG, "Activity is launching as a new task, so cancelling activity result.");
+           r.resultTo.task.stack.sendActivityResultLocked(-1,
+                   r.resultTo, r.resultWho, r.requestCode,
+                   Activity.RESULT_CANCELED, null);
+           r.resultTo = null;
+       }
+```
+如果启动的activity需要新的task，那么新启动的activity将会与其caller断开依赖关系，这个关系主要是指result反馈，A-->B,如果A是通过startActivityForResult()请求启动的，并且requestCode >=0,那么如果B是在新的task中，那么B在finish的时候将不再向A反馈result，而是在启动过程中就会向A反馈一个RESULT_CANCELED。
+
+
+因为FLAG_ACTIVITY_NEW_DOCUMENT,会在overview screen以一个task的形式展示,所以这里要为包含FLAG_ACTIVITY_NEW_DOCUMENT的的flag增添一个FLAG_ACTIVITY_NEW_TASK标志:
+
+```java
+if ((launchFlags & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0 && r.resultTo == null) {
+        launchFlags |= Intent.FLAG_ACTIVITY_NEW_TASK;
+    }
+```
+
+因为FLAG_ACTIVITY_NEW_TASK标志,会首先检查是他要启动的activity的taskAffinity属性指定的task是否存在(taskAffinity没指定的话,默认就是其app包名),不存在的话,才会尝试去新建一个task.
+
+所以FLAG_ACTIVITY_NEW_TASK标志并不能保证一定要新建一个task.
+
+```java
+final boolean launchTaskBehind = r.mLaunchTaskBehind
+               && !launchSingleTask && !launchSingleInstance
+               && (launchFlags & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0;
+if ((launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0) {
+            if (launchTaskBehind
+                    || r.info.documentLaunchMode == ActivityInfo.DOCUMENT_LAUNCH_ALWAYS) {
+                launchFlags |= Intent.FLAG_ACTIVITY_MULTIPLE_TASK;
+            }
+        }
+```
+当activity设置documentLaunchMode为DOCUMENT_LAUNCH_ALWAYS时,就要在添加FLAG_ACTIVITY_MULTIPLE_TASK这个标志,结合FLAG_ACTIVITY_NEW_TASK,就能保证每次都新建一个task了.
+
+
+接着处理FLAG_ACTIVITY_NO_USER_ACTION:
+
+```java
+  mUserLeaving = (launchFlags & Intent.FLAG_ACTIVITY_NO_USER_ACTION) == 0;
+  if (DEBUG_USER_LEAVING) Slog.v(TAG_USER_LEAVING,
+          "startActivity() => mUserLeaving=" + mUserLeaving);
+
+  // 当从launcher启动app时,传入的为true,所以部不执行
+  if (!doResume) {
+      r.delayedResume = true;
+  }
+```
+在一般情况下，启动一个Activity时都不使用该标识，如果不包含该标识，AMS会判断一定的时间内是否有用户交互。如果没有用户交互的话，AMS会通知Activity回调onUserLeaving()方法，然后再回调onPause()方法，如果使用了该标识，说明目标Activity不和用户交互，所以也就不需要回调onUserLeaving()方法。
+
+确定是否现在就Resume,如果不需要立即Resume，就把r.delayResume为true，意思是延迟Resume。
+
+
+接着处理FLAG_ACTIVITY_PREVIOUS_IS_TOP,这个标志很奇葩.
+
+```java
+ActivityRecord notTop =
+              (launchFlags & Intent.FLAG_ACTIVITY_PREVIOUS_IS_TOP) != 0 ? r : null;
+if ((startFlags&ActivityManager.START_FLAG_ONLY_IF_NEEDED) != 0) {
+           ActivityRecord checkedCaller = sourceRecord;
+           if (checkedCaller == null) {
+               checkedCaller = mFocusedStack.topRunningNonDelayedActivityLocked(notTop);
+           }
+           if (!checkedCaller.realActivity.equals(r.realActivity)) {
+               // Caller is not the same as launcher, so always needed.
+               startFlags &= ~ActivityManager.START_FLAG_ONLY_IF_NEEDED;
+           }
+       }
+```
+它的注释可以看出它的含义是指如果设置了该flag，那么mHistory中最top的activity在后续的处理中将不被视为top，而将前一个activity视为top，如A-->B-->C，将B视为top。
+
+这个top activity的作用很大，涉及到后面对task的处理。但是目前来看这个flag并没有起到该有的作用，代码中判断如果设置了该标志，那么AMS将会视当前正在启动的activity为top，然后去mHistory中去查找它的前一个activity为后续task处理的top activity(topRunningNonDelayedActivityLocked()中实现)，但是现在的问题是此时此刻，正在启动的activity并不存在于mHistory中，因为我们在前一个函数中刚刚创建了这个ActivityRecord。
+
+所以这个flag基本没用,而且当从launcher启动app时,也没有设置该flag.
+
+接下来处理inTask不为null的情况,当从launcher启动app时,该参数为null,所以略过这段代码.其实该段代码与从最近列表启动activity有关系.后面会单独讲解.
+```java
+if (sourceRecord == null && inTask != null && inTask.stack != null) {
+      .........
+        } else {
+            inTask = null;
+        }
+
+```
+
+下面的这段代码,是给flag添加FLAG_ACTIVITY_NEW_TASK
+
+```java
+if (inTask == null) {
+  if (sourceRecord == null) {
+      // This activity is not being started from another...  in this
+      // case we -always- start a new task.
+      // 当初launcher启动app时,走这里
+      if ((launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) == 0 && inTask == null) {
+          Slog.w(TAG, "startActivity called from non-Activity context; forcing " +
+                  "Intent.FLAG_ACTIVITY_NEW_TASK for: " + intent);
+          launchFlags |= Intent.FLAG_ACTIVITY_NEW_TASK;
+      }
+  } else if (sourceRecord.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE) {
+      // The original activity who is starting us is running as a single
+      // instance...  this new activity it is starting must go on its
+      // own task.
+      launchFlags |= Intent.FLAG_ACTIVITY_NEW_TASK;
+  } else if (launchSingleInstance || launchSingleTask) {
+      // The activity being started is a single instance...  it always
+      // gets launched into its own task.
+      launchFlags |= Intent.FLAG_ACTIVITY_NEW_TASK;
+  }
+}
+```
+上面这段代码可以知道,当sourceRecord为null,且该activity不在最近列表中,那么就要给flag添加FLAG_ACTIVITY_NEW_TASK(如果没有的话).
+
+当sourceRecord不为null,也就是说是从另一个activity中启动该activity的,那么如果sourceRecord所代表的activity的启动模式,是singleinstance的话,也要给flag添加FLAG_ACTIVITY_NEW_TASK.
+
+最后就是当要启动的activity自己设置了启动模式为SingleInstance或者SingleTask,也要给flag添加FLAG_ACTIVITY_NEW_TASK.
+
+接下来的这段代码是一个保险的检查,可能启动这个activity的activity要被销毁了(从launcher启动app,不走这段代码,因为sourceRecord为null)
+
+```java
+ActivityInfo newTaskInfo = null;
+Intent newTaskIntent = null;
+ActivityStack sourceStack;
+if (sourceRecord != null) {
+  if (sourceRecord.finishing) {
+      if ((launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) == 0) {
+          Slog.w(TAG, "startActivity called from finishing " + sourceRecord
+                  + "; forcing " + "Intent.FLAG_ACTIVITY_NEW_TASK for: " + intent);
+          launchFlags |= Intent.FLAG_ACTIVITY_NEW_TASK;
+          // 启动activity的发起者的向关系
+          newTaskInfo = sourceRecord.info;
+          // 创建原task时的intent,也就是启动这个task 根activity的intent
+          newTaskIntent = sourceRecord.task.intent;
+      }
+      sourceRecord = null;
+      sourceStack = null;
+  } else {
+      sourceStack = sourceRecord.task.stack;
+  }
+} else {
+  sourceStack = null;
+}
+```
+主要是检查启动它的activity是不是快要被销毁了，那么可能task也要销毁,如果是的话那就后面需要启动一个新的task，从而将这个activity放到这个task中去。,所以这里提前保存一些相关信息.
+
+
+接下来的一段代码就开始着手寻找一个合适的task来存放这个即将启动的activity,如果没有的话,就创建一个新task.
+
+AMS首先肯定是努力寻找一个已经存在的task:
+
+FLAG_ACTIVITY_NEW_TASK标志表示想要重新创建一个task,但是未必一定要新建.
+
+当有FLAG_ACTIVITY_NEW_TASK,但没有设置FLAG_ACTIVITY_MULTIPLE_TASK,或者当前启动的activity是SingleInstance or SingleTask模式,通过前面文章的介绍可知,AMS会尝试需找豁然activity中taskAffinity同名的task是否存在,不存在才创建.
+
+
+```java
+// if语句中的三个条件下需要查找是否有可复用的task
+if (((launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0 &&
+             (launchFlags & Intent.FLAG_ACTIVITY_MULTIPLE_TASK) == 0)
+             || launchSingleInstance || launchSingleTask)
+{
+            if (inTask == null && r.resultTo == null) {
+                // 如果是非SingleInstance启动模式,则利用findTaskLocked查找
+                // 如果是 SingleInstance启动模式,则利用findActivityLocked查找.
+                // 这两个方法返回的是找到的task的顶端的activity,并不一定是要启动的activity
+                ActivityRecord intentActivity = !launchSingleInstance ?
+                        findTaskLocked(r) : findActivityLocked(intent, r.info);
+                // 第一次启动app的时候,不会走这个分支的
+                if (intentActivity != null) {
+                    // When the flags NEW_TASK and CLEAR_TASK are set, then the task gets reused
+                    // but still needs to be a lock task mode violation since the task gets
+                    // cleared out and the device would otherwise leave the locked task.
+                    if (isLockTaskModeViolation(intentActivity.task,
+                            (launchFlags & (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK))
+                            == (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK))) {
+                        showLockTaskToast();
+                        Slog.e(TAG, "startActivityUnchecked: Attempt to violate Lock Task Mode");
+                        return ActivityManager.START_RETURN_LOCK_TASK_MODE_VIOLATION;
+                    }
+                    if (r.task == null) {
+                        r.task = intentActivity.task;
+                    }
+                    // 如果找到的activity所在的task的intent为null
+                    // 这种情况发生在TaskReparenting之后，TaskReparenting之后，AMS为这个activity创建一个新的task，并将启动这个activity的Intent赋值给task.affinityIntent，并且此时的//task.Intent==null
+                    if (intentActivity.task.intent == null) {
+                        // 这时要设置task的intent为要启动activity的intent
+                        intentActivity.task.setIntent(r);
+                    }
+                    // 找到task所在的ActivityStack
+                    targetStack = intentActivity.task.stack;
+                    targetStack.mLastPausedActivity = null;
+                    // 找到当前处于前台的ActivityStack
+                    final ActivityStack focusStack = getFocusedStack();
+                    // 找到 处于前台的ActivityStack中的最顶端activity
+                    // 实际就是编译ActivityStack中的 mTaskHistory
+                    //  mTaskHistory中记录了该ActivityStack中最近所有的Task
+                    // 首先遍历最近运行的Task中activity,然后找到task中顶端的activity
+                    ActivityRecord curTop = (focusStack == null)
+                            ? null : focusStack.topRunningNonDelayedActivityLocked(notTop);
+                    boolean movedToFront = false;
+                    // 此时判断运行在前台的activity的task是否和要启动的activity所需的task是否一致,
+                    // 不一致的话,设置movedToFront为true,预示着需要将启动的activity所需的task调到前台
+                    //
+                    if (curTop != null && (curTop.task != intentActivity.task ||
+                            curTop.task != focusStack.topTask())) {
+                        r.intent.addFlags(Intent.FLAG_ACTIVITY_BROUGHT_TO_FRONT);
+                        if (sourceRecord == null || (sourceStack.topActivity() != null &&
+                                sourceStack.topActivity().task == sourceRecord.task)) {
+                            // We really do want to push this one into the user's face, right now.
+                            if (launchTaskBehind && sourceRecord != null) {
+                                intentActivity.setTaskToAffiliateWith(sourceRecord.task);
+                            }
+                            movedHome = true;
+                            // 将待启动的Activity的task移动到其所在的ActivityStack的最顶端
+                            // 将ActivityStack调到前台.
+                            targetStack.moveTaskToFrontLocked(intentActivity.task, noAnimation,
+                                    options, r.appTimeTracker, "bringingFoundTaskToFront");
+                            movedToFront = true;
+                            if ((launchFlags &
+                                    (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_TASK_ON_HOME))
+                                    == (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_TASK_ON_HOME)) {
+                                // Caller wants to appear on home activity.
+                                intentActivity.task.setTaskToReturnTo(HOME_ACTIVITY_TYPE);
+                            }
+                            options = null;
+                        }
+                    }
+                    if (!movedToFront) {
+                        if (DEBUG_TASKS) Slog.d(TAG_TASKS, "Bring to front target: " + targetStack
+                                + " from " + intentActivity);
+
+                        targetStack.moveToFront("intentActivityFound");
+                    }
+
+                    // 如果包含这个flag,那么需要reset task
+                    // 就是销毁那么使用FLAG_ACTIVITY_CLEAR_WHEN_TASK_RESET(API21已经废弃取而代之的是FLAG_ACTIVITY_NEW_DOCUMENT)
+                    // 启动的activity
+                    if ((launchFlags&Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED) != 0) {
+                      // 首先检查要启动的activity,也就是r中的intent中的flag是否设置FLAG_CLEAR_TASK_ON_LAUNCH,设置的话,forceReset设置为true
+                      // 如果没有设置FLAG_ALWAYS_RETAIN_TASK_STATE,forceReset设置为true,设置的话,forceReset不做处理
+                      // 也是就是说当FLAG_CLEAR_TASK_ON_LAUNCH和FLAG_ALWAYS_RETAIN_TASK_STATE都设置的话,引发冲突,此时忽略FLAG_ALWAYS_RETAIN_TASK_STATE
+                      // 该方法内部会逆序索引mTaskHistory,一次和intentActivity.task做比较,一致的话,执行resetTargetTaskIfNeededLocked
+                      // 不一致的话执行resetAffinityTaskIfNeededLocked,处理"allowTaskReparenting"的情况
+                      // 总之该方法返回rest task之后task的顶端activity,rest时,FLAG_ACTIVITY_CLEAR_WHEN_TASK_RESET启动的activity以及在其之上的activity都会被clear,
+                      // FLAG_ALLOW_TASK_REPARENTING启动的activity可能会被移到其他的task
+                      // 如果新启动activity带有FLAG_FINISH_ON_TASK_LAUNCH,一律要求删除除root activity之外的所有的activity
+                        intentActivity = targetStack.resetTaskIfNeededLocked(intentActivity, r);
+                    }
+                    // 这里如果startFlags中有START_FLAG_ONLY_IF_NEEDED的话，
+                    // 表示只在需要的情况下才会启动目标，即如果被启动的对象和调用者是同一个的时候，那么就没有必要重复操作。
+                    // 从launcher启动app不会设置这个flag
+                    if ((startFlags & ActivityManager.START_FLAG_ONLY_IF_NEEDED) != 0) {
+                        if (doResume) {
+                            resumeTopActivitiesLocked(targetStack, null, options);
+
+                            // Make sure to notify Keyguard as well if we are not running an app
+                            // transition later.
+                            if (!movedToFront) {
+                                notifyActivityDrawnForKeyguard();
+                            }
+                        } else {
+                            ActivityOptions.abort(options);
+                        }
+                        return ActivityManager.START_RETURN_INTENT_TO_CALLER;
+                    }
+                    if ((launchFlags & (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK))
+                            == (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK)) {
+
+                        reuseTask = intentActivity.task;
+                        // 清除task中所以已经存在的activity
+                        reuseTask.performClearTaskLocked();
+                        // 以启动这个新activity的intent为内容,重新设置这个task中的相关属性,
+                        // 例如 affinity等,也就是说新启动的activity会成为这个task的root activity
+                        reuseTask.setIntent(r);
+                    } else if ((launchFlags & FLAG_ACTIVITY_CLEAR_TOP) != 0
+                            || launchSingleInstance || launchSingleTask) {
+                        // 在上面if中的三个条件意味着,要清除task中要启动的activity之上的所有activity(不包括这个这个要启动的activity)
+                        // 但是也有例外的清空,如果FLAG_ACTIVITY_CLEAR_TOP,但没设置singleTop模式而是设置了standard模式(LAUNCH_MULTIPLE),那么task中这个已经存在的要启动的
+                        // activity实例,也会被清除,这是由下面的这个方法完成的工作,并返回可复用的activity.返回null,表示清除了这个已经存在的实例,表示不希望复用相同的activity。
+                        ActivityRecord top =
+                                intentActivity.task.performClearTaskLocked(r, launchFlags);
+
+                        // 不为null 表示找到了可复用的activity
+                        if (top != null) {
+                          // 如果是root activity,还要利用新的intent修改task的相关属性
+                            if (top.frontOfTask) {
+                                top.task.setIntent(r);
+                            }
+                            ActivityStack.logStartActivity(EventLogTags.AM_NEW_INTENT,
+                                    r, top.task);
+                            // 将新intent发送给这个这个已经存在的activity实例的onNewIntent()
+                            top.deliverNewIntentLocked(callingUid, r.intent, r.launchedFromPackage);
+                        } else {
+                          // 为null表示清除了这个已经存在的实例,表示不希望复用相同的activity
+                         // 设置addingToTask为true,表示需要将activity天价到可复用的task中
+                            addingToTask = true;
+                            // Now pretend like this activity is being started by the top of its
+                            // task, so it is put in the right place.
+                            sourceRecord = intentActivity;
+                            TaskRecord task = sourceRecord.task;
+                            if (task != null && task.stack == null) {
+                                // Target stack got cleared when we all activities were removed
+                                // above. Go ahead and reset it.
+                                targetStack = computeStackFocus(sourceRecord, false /* newTask */);
+                                targetStack.addTask(
+                                        task, !launchTaskBehind /* toTop */, false /* moving */);
+                            }
+
+                        }// 下面的这个else  if 处理 standard和signaltop模式
+                    } else if (r.realActivity.equals(intentActivity.task.realActivity)) {
+                        // 如果是signaltop模式,而且要启动的activity就是task的顶端activity,
+                        if (((launchFlags&Intent.FLAG_ACTIVITY_SINGLE_TOP) != 0 || launchSingleTop)
+                                && intentActivity.realActivity.equals(r.realActivity)) {
+                            ActivityStack.logStartActivity(EventLogTags.AM_NEW_INTENT, r,
+                                    intentActivity.task);
+                            // 如果当前task顶端的activity就是其root activity,那么就要使用新的intent重新修改task的相关属性
+                            if (intentActivity.frontOfTask) {
+                                intentActivity.task.setIntent(r);
+                            }
+                            // 将新intent发送给这个这个已经存在的activity实例的onNewIntent()
+                            intentActivity.deliverNewIntentLocked(callingUid, r.intent,
+                                    r.launchedFromPackage);
+                        } else if (!r.intent.filterEquals(intentActivity.task.intent)) {
+                            // In this case we are launching the root activity
+                            // of the task, but with a different intent.  We
+                            // should start a new instance on top.
+                            // 当前启动的activity和task顶端activity不一致,而且启动activity的的Intent和task的Intent不同，那么将会重新启动这个activity。
+                            addingToTask = true;
+                            sourceRecord = intentActivity;
+                        }
+                    } else if ((launchFlags&Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED) == 0) {
+                        // 如果启动的Intent没有设置Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED，那么一定不会复用任何的activity。
+                        // In this case an activity is being launched in to an
+                        // existing task, without resetting that task.  This
+                        // is typically the situation of launching an activity
+                        // from a notification or shortcut.  We want to place
+                        // the new activity on top of the current task.
+                        addingToTask = true;
+                        sourceRecord = intentActivity;
+                            // rootWasReset为 True if the intent at the root of the task had
+                            // the FLAG_ACTIVITY_RESET_TASK_IF_NEEDED flag.
+                    } else if (!intentActivity.task.rootWasReset) {
+                        // In this case we are launching in to an existing task
+                        // that has not yet been started from its front door.
+                        // The current task has been brought to the front.
+                        // Ideally, we'd probably like to place this new task
+                        // at the bottom of its stack, but that's a little hard
+                        // to do with the current organization of the code so
+                        // for now we'll just drop it.
+                        intentActivity.task.setIntent(r);
+                    }
+                    //  addingToTask为false,表示不需要创建一个新activity,也就是说找到了可复用的activity,那么
+                     // activity的启动过程至此结束，直接调用resumeTopActivityLocked()resume top的activity即可。
+                    if (!addingToTask && reuseTask == null) {
+                        // We didn't do anything...  but it was needed (a.k.a., client
+                        // don't use that intent!)  And for paranoia, make
+                        // sure we have correctly resumed the top activity.
+                        if (doResume) {
+                          // 显示可复用的task中的顶端activity,与要启动的activity不一致
+                            targetStack.resumeTopActivityLocked(null, options);
+                            if (!movedToFront) {
+                                // Make sure to notify Keyguard as well if we are not running an app
+                                // transition later.
+                                notifyActivityDrawnForKeyguard();
+                            }
+                        } else {
+                            ActivityOptions.abort(options);
+                        }
+                        return ActivityManager.START_TASK_TO_FRONT;
+                    }
+                }
+            }
+        }
+```
+上面的这段代码很重要,主要描述了AMS何种情况下会查找是否有可复用的task,已经可复用的task中是否有可复用的activity.如果没有可复用的activity，则需要启动一个新的activity，如果有可复用的activity，那么activity的启动过程至此结束，直接调用resumeTopActivityLocked()resume top的activity即可。
+
+上面已经对代码进行了详细的注释,现在对其总结一下:
+
+#### 什么情况下会去查找是否有可复用的task
+
+以下3种条件需要检查是否有有task可复用
+
+1. (launchFlags&Intent.FLAG_ACTIVITY_NEW_TASK) != 0 &&
+                (launchFlags&Intent.FLAG_ACTIVITY_MULTIPLE_TASK) == 0;
+
+2. r.launchMode == ActivityInfo.LAUNCH_SINGLE_TASK
+
+3. r.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE
+
+Intent.FLAG_ACTIVITY_MULTIPLE_TASK不能单独使用，它是和Intent.FLAG_ACTIVITY_NEW_TASK或者FLAG_ACTIVITY_NEW_DOCUMENT结合起来使用的，如果设置了Intent.FLAG_ACTIVITY_MULTIPLE_TASK，那么将会永远启动一个新的task，不管是否有可复用的task。
+
+
+#### 如何查找可复用的task
+
+1. launchMode != ActivityInfo.LAUNCH_SINGLE_INSTANCE的情况，也就是前面两个条件,遵循如下规则： findTaskLocked(r)
+
+该函数的功能是找到目标ActivityRecord,也就是要启动的activity所在的任务栈(TaskRecord)，如果找到，则返回栈顶的ActivityRecord，否则，返回null
+
+
+```java
+ActivityRecord findTaskLocked(ActivityRecord r) {
+    if (DEBUG_TASKS) Slog.d(TAG, "Looking for task of " + r);
+    for (int displayNdx = mActivityDisplays.size() - 1; displayNdx >= 0; --displayNdx) {
+        final ArrayList<ActivityStack> stacks = mActivityDisplays.valueAt(displayNdx).mStacks;
+        for (int stackNdx = stacks.size() - 1; stackNdx >= 0; --stackNdx) {
+            final ActivityStack stack = stacks.get(stackNdx);
+            if (!r.isApplicationActivity() && !stack.isHomeStack()) {
+                if (DEBUG_TASKS) Slog.d(TAG, "Skipping stack: (home activity) " + stack);
+                continue;
+            }
+            if (!stack.mActivityContainer.isEligibleForNewTasks()) {
+                if (DEBUG_TASKS) Slog.d(TAG, "Skipping stack: (new task not allowed) " +
+                        stack);
+                continue;
+            }
+            // 实际调用ActivityStack的findTaskLocked
+            final ActivityRecord ar = stack.findTaskLocked(r);
+            if (ar != null) {
+                return ar;
+            }
+        }
+    }
+    if (DEBUG_TASKS) Slog.d(TAG, "No task found");
+    return null;
+}
+```
+
+该方法是ActivityStackSupervisor中定义的,其中的变量mActivityDisplays,也是ActivityStackSupervisor中定义的,是一个SparseArray<ActivityDisplay> 的数组,有几块屏幕,就有几个ActivityDisplay.
+
+ActivityDisplay类也是ActivityStackSupervisor中定义的.Android支持多屏显示，在不同的显示设备上可以有不同的ActivityStack。
+
+所有的ActivityStack都是通过ActivityStackSupervisor管理起来的。 在ActivityStackSupervisor内部，设计了ActivityDisplay这个内部类，它对应到一个显示设备，默认的显示设备是手机屏幕。 ActivityStackSupervisor间接通过ActivityDisplay来维护多个ActivityStack的状态。 ActivityStack有一个属性是mStacks，当mStacks不为空时，表示ActivityStack已经绑定到了显示设备， 其实ActivityStack.mStacks只是一个副本，真正的对象在ActivityDisplay中的mStacks.
+
+ActivityStackSupervisor通过变量mActivityDisplays就能间接获取所有ActivityStack的信息.
+
+Activity的类型有三种：APPLICATION_ACTIVITY_TYPE(应用)、HOME_ACTIVITY_TYPE(桌面)、RECENTS_ACTIVITY_TYPE(最近使用).在ActivityRecord的构造方法中被初始化,当从launcher启动app时,肯定是APPLICATION_ACTIVITY_TYPE.
+
+```java
+if ((!_componentSpecified || _launchedFromUid == Process.myUid()
+                 || _launchedFromUid == 0) &&
+                 Intent.ACTION_MAIN.equals(_intent.getAction()) &&
+                 _intent.hasCategory(Intent.CATEGORY_HOME) &&
+                 _intent.getCategories().size() == 1 &&
+                 _intent.getData() == null &&
+                 _intent.getType() == null &&
+                 (intent.getFlags()&Intent.FLAG_ACTIVITY_NEW_TASK) != 0 &&
+                 isNotResolverActivity()) {
+             // This sure looks like a home activity!
+             mActivityType = HOME_ACTIVITY_TYPE;
+             // "com.android.systemui.recents"
+         } else if (realActivity.getClassName().contains(RECENTS_PACKAGE_NAME)) {
+             mActivityType = RECENTS_ACTIVITY_TYPE;
+         } else {
+             mActivityType = APPLICATION_ACTIVITY_TYPE;
+         }
+```
+
+实际调用ActivityStack的findTaskLocked方法:
+
+```java
+ActivityRecord findTaskLocked(ActivityRecord target) {
+        Intent intent = target.intent;
+        ActivityInfo info = target.info;
+        ComponentName cls = intent.getComponent();//要启动的activity的组件名:包名+类名
+
+       ...........
+
+       for (int taskNdx = mTaskHistory.size() - 1; taskNdx >= 0; --taskNdx) {
+         .........
+         final Intent taskIntent = task.intent;
+         final Intent affinityIntent = task.affinityIntent;
+         ........
+         if (task.rootAffinity.equals(target.taskAffinity)) {
+                   if (DEBUG_TASKS) Slog.d(TAG, "Found matching affinity!");
+                   return r;
+         }else if (taskIntent != null && taskIntent.getComponent() != null &&
+                taskIntent.getComponent().compareTo(cls) == 0 &&
+                Objects.equals(documentData, taskDocumentData)) {
+            return r;
+        } else if (affinityIntent != null && affinityIntent.getComponent() != null &&
+                affinityIntent.getComponent().compareTo(cls) == 0 &&
+                Objects.equals(documentData, taskDocumentData)) {
+            return r;
+        }
+         ...
+       }
+       ............
+```
+
+总的来说,这种情况下遵循如下规则:
+
+遍历所有显示设备中的ActivityStack(一般情况下,只有一个显示设备)中的所有TaskRecord:
+
+a. 查找ActivityStack中的mTaskHistory是否有与要启动的activity相同affinity的task，找到的话返回,返回这个task顶端的activity
+
+这里要说明下,TaskRecord中有两个关于affinity的属性,如下所示:
+
+```java
+String affinity;        // The affinity name for this task, or null; may change identity.
+String rootAffinity;    // Initial base affinity, or null; does not change from initial root.
+```
+
+两者的区别代码注释也很清晰了,rootAffinity和affinity是存储创建这个task时,activity的taskAffinity.当rest 这个task的时候,可能会修改task的affinity,但是不会修改rootAffinity.
+
+b.  如果activity没有affinity，即属性android:taskAffinity设置为“”，空字符串时。此时AMS就会去mHistory中去查找是否有task的root activity和启动的activity相同，通过比较task.intent.getComponent()和启动activity的Comeponent比较
+
+c.如果task.Intent为空，这种情况发生在TaskReparenting之后，TaskReparenting之后，AMS为这个activity创建一个新的task，并将启动这个activity的Intent赋值给task.affinityIntent，并且此时的task.Intent==null。此时就需要比较task.affinityIntent.getComponent()和启动activity的Comeponent比较，看是否和启动的activity相同
+
+ 以上3个规则中，均是返回找的task中最上面的activity，而不一定是要启动的activity，至于如何处理要启动的activity和task中已有的activity，后面会介绍。
+
+2. launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE的情况，遵循如下规则： findActivityLocked(intent, r.info)
+
+根据Intent和ActivityInfo这两个参数可以获取一个Activity的包名，该函数会从栈顶至栈底遍历ActivityStack中的所有Activity，如果包名匹配成功，就返回
+
+```java
+ActivityRecord findActivityLocked(Intent intent, ActivityInfo info) {
+     for (int displayNdx = mActivityDisplays.size() - 1; displayNdx >= 0; --displayNdx) {
+         final ArrayList<ActivityStack> stacks = mActivityDisplays.valueAt(displayNdx).mStacks;
+         for (int stackNdx = stacks.size() - 1; stackNdx >= 0; --stackNdx) {
+             final ActivityRecord ar = stacks.get(stackNdx).findActivityLocked(intent, info);
+             if (ar != null) {
+                 return ar;
+             }
+         }
+     }
+     return null;
+ }
+
+```
+
+```java
+ActivityRecord findActivityLocked(Intent intent, ActivityInfo info) {
+    ComponentName cls = intent.getComponent();
+    if (info.targetActivity != null) {
+        cls = new ComponentName(info.packageName, info.targetActivity);
+    }
+    final int userId = UserHandle.getUserId(info.applicationInfo.uid);
+
+    for (int taskNdx = mTaskHistory.size() - 1; taskNdx >= 0; --taskNdx) {
+        TaskRecord task = mTaskHistory.get(taskNdx);
+        if (!isCurrentProfileLocked(task.userId)) {
+            return null;
+        }
+        final ArrayList<ActivityRecord> activities = task.mActivities;
+        for (int activityNdx = activities.size() - 1; activityNdx >= 0; --activityNdx) {
+            ActivityRecord r = activities.get(activityNdx);
+                return r;
+            }
+        }
+    }
+
+    return null;
+}
+```
+
+对于ActivityInfo.LAUNCH_SINGLE_INSTANCE启动模式来说，它所处的task中只允许有它一个activity，因此它的规则只符合上面规则中的b.
+
+对于规则a，由于设置了ActivityInfo.LAUNCH_SINGLE_INSTANCE启动模式的activity，它只能自己独处一个task，不可能和别人共享同一个task，因此ActivityStack中的mTaskHistory即使存在了与该activity有相同的affinity的activity，如果这个activity和启动的activity不同，那么ActivityInfo.LAUNCH_SINGLE_INSTANCE启动模式的activity也不可能和它共用一个task，因此这规则a完全可以不用检查。
+
+对于规则b，由于该模式的activity独处一个task，因此完全没有可能所处的task的affinity和自己的affinity不同，因此，假如ActivityStack中的mTaskHistory存在相同的activity与启动的activity相同，那么这个activity的affinity必然和自己的相同。所以对于这种模式，规则b囊括了其他模式的规则a,b。
+
+对于规则c，同样的道理，ActivityInfo.LAUNCH_SINGLE_INSTANCE启动模式的activity不可能处在与自己不同affinity的task中，因此不可能出现TaskReparenting操作，所以这条也不需要。
+
+#### 如何处理找到的可复用的task
+
+首先得到当前前台的activity,以从launcher启动app这个场景来说,当前前台activity就是home.
+
+```java
+final ActivityStack lastStack = getLastStack();
+ActivityRecord curTop = lastStack == null?
+                            null : lastStack.topRunningNonDelayedActivityLocked(notTop);
+```
+
+接着判断urTop.task != intentActivity.task,其实说白了,就是为了确定当前的task是否就是要启动的activity所在的task,不是的话调用
+
+targetStack.moveTaskToFrontLocked()方法,该方法会调用insertTaskAtTop()方法将task移动其所在的ActivityStack的顶端,然后调用moveToFront()方法将这个Activity移动到前台.也就是预示着要启动的activity所在的task被移动到了前台.
+
+
+#### 将task移动到前台后检查是否需要rest task
+
+如果启动activity的flag设置了FLAG_ACTIVITY_RESET_TASK_IF_NEEDED,则需要进行rest task.
+
+最常见的情况，当从Home启动应用程序时，会设置这个flag；从recently task进入应用程序，则不会设置这个falg。
+
+设置了FLAG_ACTIVITY_RESET_TASK_IF_NEEDED，AMS会对复用的task作如下处理:
+
+⑴ 对于复用task中的除root activity外的activity，有如下处理
+
+在此之前，先介绍activity的几个关键属性(task的root  activity 设置了下面所提的属性的话,task也就具备了这样的特性)：
+
+ ① 如果复用task在后台时间超过一定的时间，那么在这个过程中将clear除root activity之外的所有的activity；
+
+ ② 如果新启动的activity设置了属性ActivityInfo.FLAG_ALWAYS_RETAIN_TASK_STATE，那么表明不需要clear task中的activity；
+
+ ③ 如果新启动的activity设置了属性ActivityInfo.FLAG_CLEAR_TASK_ON_LAUNCH，那么表明只要task离开前台，一律要求删除除root activity之外的所有的activity；
+
+ ④ 复用task中的activity设置了属性ActivityInfo.FLAG_FINISH_ON_TASK_LAUNCH，那么复用task从home中再次被启动到前台时，这个activity会被删除；
+
+ ⑤ 复用task中的activity设置了属性ActivityInfo.FLAG_ALLOW_TASK_REPARENTIN，并且这个activity的resultTo为空，那么也就是说这个activity和它的caller没有依赖关系，需要对其进行TaskReparenting操作
+
+ ⑥ 复用task中的activity的Intent设置属性Intent.FLAG_ACTIVITY_CLEAR_WHEN_TASK_RESET，那么下次再从home中进入到task中，那么将删除设置了该属性的activity以上所有的activity，例如A-->B-->C-->D-->E,假如在C启动D时设置了该属性，那么下次从HOME中再次进入到这个task中时，将会是A-->B-->C。
+
+ ⑦ 如果复用task中的activity的resultTo不为空，也就是启动这个activity的是一个activity，那么这个activity的处理将按照它的前一个activity的处理方式来处理，不管在何时情况下，它的前一个activity都是启动它的activity，即便resultTo不是前一个activity，如设置了Intent.FLAG_ACTIVITY_FORWARD_RESULT。如果复用task中每个activity的resultTo都不为空，并且上述处理优先级在其前面的属性没有设置的话，那么这个复用task中的activity将不作任何的处理。
+
+  一般情况下，activity的resultTo都不为空，除非设置了Intent.FLAG_ACTIVITY_FORWARD_RESULT，那么此时被启动的activity的caller的resultTo将会为空。
+
+ task中的activity的属性设置是上述属性的组合，因此reset task过程要按照一定的优先级来处理，上述属性的处理优先级是：⑥=④>⑦>⑤>③=②>①
+
+
+
+ 具体操作顺序如下：
+
+1. 根据⑥，④条件来删除复用task中相应的activity；
+
+2 .条件下，将会暂时不做处理，再根据它的前一个activity的属性来做处理，即使这个activity设置了allowTaskReparenting；
+
+3. 如果activity的resultTo为空，并且满足条件⑤，那么将其及其以上未作处理的，满足条件⑦的所有activity，一并进行TaskReparenting操作，并放置在mHistory栈底。它们在mHistory栈底顺序如同在复用task中的顺序；
+
+4. 根据①②③的条件来删除复用task中相应的activity。
+
+⑵ 不属于复用task的activity，并且它的resultTo不为空，那么将根据它的前一个activity的处理来处理；
+
+⑶ 不属于复用task，但是和当前启动的activity有相同affinity，并且允许TaskReparenting操作，那么将进行以下操作：
+
+ 如果满足上述的①②③④的条件，但是其中的task不是复用task，而是这个activity所处的task，那么将输出这个activity，而不是进行TaskReparenting操作。
+
+
+为什么非复用task中的activity，和当前启动的activity有相同affinity，并且允许TaskReparenting操作，满足了①②③④的条件之后要删除呢，为什么非复用task中的其他activity，不需要删除呢？
+
+正因为它和启动的activity有相同的affinity，因此AMS认为这个activity是和启动activity相关的，以后可能会重新调用，所以当其满足删除条件后,这时它将不允许TaskReparenting操作，并且不应该再允许它存在于其他的task中，此时应该删除。
+
+如果没有满足①②③④的条件，那么将会对其进行TaskReparenting操作，重新将其移动到复用task或新启动的task中。
+
+ #### 判断可复用的task中是否有可复用的activity
+
+ (1)Intent设置了Intent.FLAG_ACTIVITY_CLEAR_TOP，或者launchMode == ActivityInfo.LAUNCH_SINGLE_TASK，或者r.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE；这3种条件有一个共同点，就是启动的activity启动之后，在这个task中,这个activity之上不能有其他的activity。
+
+ 一般情况下，需要将复用task中启动的activity之上的所有的activity删除，
+
+当activity的launchMode == ActivityInfo.LAUNCH_MULTIPLE，即standard模式，并且Intent并未要求singletop模式，这种情况是连复用task中与启动activity相同的activity都要删除，也就是不希望复用相同的activity。
+
+performClearTaskLocked()实现了上述功能，并返回可复用的activity。
+
+如果有可复用的activity，并且这个activity是task的root activity，由于task的Intent是root activity的Intent，所以需要重新设置task的Intent。
+
+向可复用的activity发送新的Intent，通知它Intent的变化，最终会调用到这个activity的onNewIntent()方法。
+
+如果没找到可复用的activity,那么设置addingToTask = true;sourceRecord = intentActivity;
+
+⑵ 如果不满足⑴条件的话，但是启动的activity与复用task的root activity相同。
+
+如果此时Intent设置了Intent.FLAG_ACTIVITY_SINGLE_TOP，并且复用task的top activity正好是要启动的activity，则复用这个activity，同时更新activity的Intent，如果需要更新task的Intent。
+
+如果Intent没有设置了Intent.FLAG_ACTIVITY_SINGLE_TOP，即使设置了，但是当前的top activity不是正要启动的activity，那么会判断当前启动的Intent和task的Intent不同，那么将会重新启动这个activity。
+
+ 其他情况，将直接resume top的activity(不是要启动的activity)。
+
+ ⑶ 如果⑴ ⑵条件均不满足，其实如果不满足⑴ ⑵条件的话，复用的task中就不存在与启动的activity相同的activity了，如果启动的Intent没有设置Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED，那么一定不会复用任何的activity。
+
+ (4) 如果⑴ ⑵条件均不满足，并且Intent设置了Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED，那么需要检查当前复用task的Intent是否设置了Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED。如果没有设置，重新设置新的Intent,这种情况下同样不可能复用activity,因为task中不存在与启动的activity相同的activity。
+
+在4这种情况,当复用的task中没有找到要启动的activity的时候，将不会显示要启动的activity，addingToTask为false,而是改为显示复用的task中顶端的activity.比如从launcher中启动app,随便进入app中的另一个activity中,然后按home健,然后在点击app图标,如果刚刚进入的activity没有设置FLAG_ACTIVITY_CLEAR_WHEN_TASK_RESET,那么将显示这个activity而不是app的主activity.
+
+至此，整个Task复用，以及activity复用的过程就介绍完了，如果没有可复用的activity，且没没有可复用的task则需要启动一个新的activity，或者有可复用的task但是没设置FLAG_ACTIVITY_RESET_TASK_IF_NEEDED,也要重启动一个新的activity,但是如果有可复用的activity而且设置了FLAG_ACTIVITY_RESET_TASK_IF_NEEDED,则不会启动要启动的activity,而是启动可复用task的顶端的task.
+
+#### singleTop和singleTask属性的处理
+
+余下代码是针对singleTop和singleTask属性的处理，前面分析Task复用的时候，也有对singleTop和singleTask属性的处理，两者有什么不同呢？
+
+前面是在有可复用task的前提下分析的.
+
+接下来分析都是在没有可复用task前提下.
+
+当设置Intent.FLAG_ACTIVITY_SINGLE_TOP或者launchMode == ActivityInfo.LAUNCH_SINGLE_TOP或者launchMode == ActivityInfo.LAUNCH_SINGLE_TASK这几种情况下，如果top activity与启动的activity为同一个activity，那么将复用top activity，并直接resume top activity。
+
+```java
+ActivityStack topStack = getFocusedStack();
+           ActivityRecord top = topStack.topRunningNonDelayedActivityLocked(notTop);
+           if (top != null && r.resultTo == null) {
+               // 如果顶端activity就是要启动activity,那就启动顶端的就可以了
+               if (top.realActivity.equals(r.realActivity) && top.userId == r.userId) {
+                   if (top.app != null && top.app.thread != null) {
+                       if ((launchFlags & Intent.FLAG_ACTIVITY_SINGLE_TOP) != 0
+                           || launchSingleTop || launchSingleTask) {
+                           ActivityStack.logStartActivity(EventLogTags.AM_NEW_INTENT, top,
+                                   top.task);
+                           // For paranoia, make sure we have correctly
+                           // resumed the top activity.
+                           topStack.mLastPausedActivity = null;
+                           if (doResume) {
+                               resumeTopActivitiesLocked();
+                           }
+                           ActivityOptions.abort(options);
+                           if ((startFlags&ActivityManager.START_FLAG_ONLY_IF_NEEDED) != 0) {
+                               // We don't need to start a new activity, and
+                               // the client said not to do anything if that
+                               // is the case, so this is it!
+                               return ActivityManager.START_RETURN_INTENT_TO_CALLER;
+                           }
+                           top.deliverNewIntentLocked(callingUid, r.intent, r.launchedFromPackage);
+                           return ActivityManager.START_DELIVERED_TO_TOP;
+                       }
+                   }
+               }
+           }
+
+       }else {
+            if (r.resultTo != null) {
+                r.resultTo.task.stack.sendActivityResultLocked(-1, r.resultTo, r.resultWho,
+                        r.requestCode, Activity.RESULT_CANCELED, null);
+            }
+            ActivityOptions.abort(options);
+            return ActivityManager.START_CLASS_NOT_FOUND;
+        }
+```
+  r.resultTo == null这个条件是在startActivityForResult()的requestCode<0时成立。
+
+#### standard和singleInstance模式
+
+没有可复用的task,那么必须要创建新的task吗? 不一定!!!
+
+比如说从一个app中的一个activity启动另外一个app的一个activity,如果没有添加FLAG_ACTIVITY_NEW_TASK,那么这个activity就会添加到当前的task中.如果有FLAG_ACTIVITY_NEW_TASK,则会新创建一个task.
+
+第一次从桌面启动app时,是有这个标记的,所以会新创建一个task.
+
+```java
+// Should this be considered a new task?
+// 如果有可复用的task,addingToTask为true
+        if (r.resultTo == null && inTask == null && !addingToTask
+                && (launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0) {
+
+          .....
+          newTask = true;
+          // 找到一个合适的ActivityStack
+          targetStack = computeStackFocus(r, newTask);
+          // 确保放在ActivityStack中的mstacks的尾端也就是栈顶端.
+          // 实际上是ActivityDisplay.mstakcks
+          // 也就是确保找到的这个ActivityStack调整到当前显示屏幕的顶端
+          // 如果targetStack和homestack处于同一个屏幕中时,要调用ActivityStackSupervisor.moveHomeStack方法
+          // 因为要启动新的activity了(在没有分屏时,都符合这种情况)
+          targetStack.moveToFront("startingNewTask");
+          .....
+          // reuseTask两情况下不为null,一是intask不为null,也就是说从最近任务列表启动;
+          // 二是有可复用task,但是设置有FLAG_ACTIVITY_NEW_TASK 和 FLAG_ACTIVITY_CLEAR_TASK
+          f (reuseTask == null) {
+            // 创建Task的同时,会把task加入到activityStack中,launchTaskBehind为false,那么这个task通过insertTaskAtTop加入到activitystack的顶端
+            // 也就是mTaskHistory的末尾
+                    r.setTask(targetStack.createTaskRecord(getNextTaskId(),
+                            newTaskInfo != null ? newTaskInfo : r.info,
+                            newTaskIntent != null ? newTaskIntent : intent,
+                            voiceSession, voiceInteractor, !launchTaskBehind /* toTop */),
+                            taskToAffiliate);
+                    if (DEBUG_TASKS) Slog.v(TAG, "Starting new activity " + r + " in new task " +
+                            r.task);
+                } else {
+                    r.setTask(reuseTask, taskToAffiliate);
+                }
+          .....
+
+          mService.grantUriPermissionFromIntentLocked(callingUid, r.packageName,
+                       intent, r.getUriPermissionsLocked(), r.userId);
+          ..........
+          targetStack.mLastPausedActivity = null;
+      // 调用startActivityLocked继续启动activity
+      targetStack.startActivityLocked(r, newTask, doResume, keepCurTransition, options);
+      if (!launchTaskBehind) {
+          // Don't set focus on an activity that's going to the back.
+          mService.setFocusedActivityLocked(r, "startedActivity");
+      }
+      return ActivityManager.START_SUCCESS;
+    }
+```
+
+这里需要强调一下computeStackFocus这个方法:
+```java
+ ActivityStack computeStackFocus(ActivityRecord r, boolean newTask){
+...........
+if (mFocusedStack != mHomeStack && (!newTask ||
+                mFocusedStack.mActivityContainer.isEligibleForNewTasks())) {
+            if (DEBUG_FOCUS || DEBUG_STACK) Slog.d(TAG_FOCUS,
+                    "computeStackFocus: Have a focused stack=" + mFocusedStack);
+            return mFocusedStack;
+        }
+
+final ArrayList<ActivityStack> homeDisplayStacks = mHomeStack.mStacks;
+        for (int stackNdx = homeDisplayStacks.size() - 1; stackNdx >= 0; --stackNdx) {
+            stack = homeDisplayStacks.get(stackNdx);
+            if (!stack.isHomeStack()) {
+                if (DEBUG_FOCUS || DEBUG_STACK) Slog.d(TAG_FOCUS,
+                        "computeStackFocus: Setting focused stack=" + stack);
+                return stack;
+            }
+        }
+// Need to create an app stack for this user.
+ stack = createStackOnDisplay(getNextStackId(), Display.DEFAULT_DISPLAY);
+ if (DEBUG_FOCUS || DEBUG_STACK) Slog.d(TAG_FOCUS, "computeStackFocus: New stack r="
+         + r + " stackId=" + stack.mStackId);
+ return stack;
+.......
+
+}
+```
+
+当没有启动过app,例如刚开机时,那么mFocusedStack就是mHomeStack.
+
+此时如果从launcher中启动一个app,那么就会调用createStackOnDisplay,创建一个 ActivityStack供运行众多的app使用的ActivityStack.
+
+
+```java
+int getNextStackId() {
+       while (true) {
+           if (++mLastStackId <= HOME_STACK_ID) {
+               mLastStackId = HOME_STACK_ID + 1;
+           }
+           if (getStack(mLastStackId) == null) {
+               break;
+           }
+       }
+       return mLastStackId;
+   }
+    // 在显示屏幕中创建ActivityStack
+    ActivityStack createStackOnDisplay(int stackId, int displayId) {
+        ActivityDisplay activityDisplay = mActivityDisplays.get(displayId);
+        if (activityDisplay == null) {
+            return null;
+        }
+        // 相当于创建了一个ActivityStack
+        ActivityContainer activityContainer = new ActivityContainer(stackId);
+        mActivityContainers.put(stackId, activityContainer);
+        // 将ActivityStack与activityDisplay绑定
+        activityContainer.attachToDisplayLocked(activityDisplay);
+        return activityContainer.mStack;
+    }
+    void attachToDisplayLocked(ActivityDisplay activityDisplay) {
+               if (DEBUG_STACK) Slog.d(TAG_STACK, "attachToDisplayLocked: " + this
+                       + " to display=" + activityDisplay);
+               // ActivityStack绑定的显示屏幕
+               mActivityDisplay = activityDisplay;
+               // ActivityStack绑定的显示屏幕的id
+               mStack.mDisplayId = activityDisplay.mDisplayId;
+               // ActivityStack中的mstack来自于activityDisplay.mStacks
+               // ActivityStack.mstack记录的是与之绑定的显示屏幕中的其他ActivityStack
+               mStack.mStacks = activityDisplay.mStacks;
+               // 将此ActivityStack加入到显示屏也就是ActivityDisplay.mStacks中
+               // ActivityDisplay.mStacks记录的是这个快屏幕中所有的ActivityStack
+               // 此时,ActivityStack.mstack也包括了自己.
+               activityDisplay.attachActivities(mStack);
+               mWindowManager.attachStack(mStackId, activityDisplay.mDisplayId);
+           }
+     void attachActivities(ActivityStack stack) {
+             if (DEBUG_STACK) Slog.v(TAG_STACK,
+                     "attachActivities: attaching " + stack + " to displayId=" + mDisplayId);
+             mStacks.add(stack);
+         }
+```
+
+activityDisplay代表一个显示屏幕,activityContainer是ActivityStack的马甲.
+
+当从launcnher启动过一个app之后,按home键回到桌面,此时mFocusedStack被设置为mHomeStack.但是第一次从launcher启动app的时候,创建了ActivityStack并且执行了attachToDisplayLocked()方法.
+
+在该方法中执行了activityDisplay.attachActivities(mStack);将创建的ActivityStack加入到了显示屏幕(默认为DEFAULT_DISPLAY)中mStacks中.mHomeStack也是一个ActivityStack,绑定的显示屏幕是DEFAULT_DISPLAY.代码中注释也说了,ActivityStack的mStacks记录的是与之绑定的显示屏幕中的所有ActivityStack.自然也包括前面创建的app stack 了.
+
+所以启动另一个app时执行:
+```java
+//拿到DEFAULT_DISPLAY屏幕绑定的所有ActivityStack
+final ArrayList<ActivityStack> homeDisplayStacks = mHomeStack.mStacks;
+        for (int stackNdx = homeDisplayStacks.size() - 1; stackNdx >= 0; --stackNdx) {
+          stack = homeDisplayStacks.get(stackNdx);
+            // 找到一个不是mHomeStack的ActivityStack并返回
+            // 当之前在这个快屏幕中创建过一个app stack时,就返回这个stack.
+            if (!stack.isHomeStack()) {
+                if (DEBUG_FOCUS || DEBUG_STACK) Slog.d(TAG_FOCUS,
+                        "computeStackFocus: Setting focused stack=" + stack);
+                return stack;
+            }
+        }
+```
+
+
+⑴ 设置了Intent.FLAG_ACTIVITY_NEW_TASK，则为该activity创建一个新的task；
+
+上述贴出的代码是从launcher启动app时的代码的流程,未贴出的代码总结如下:
+
+⑵ 在当前的task中启动新的activity，
+
+    ①当前的caller是一个activity，如果设置Intent.FLAG_ACTIVITY_CLEAR_TOP，当前的task如果存在要启动的activity(这个和上一节中的Task复用时的clear top过程不同，两者是互斥的过程，不冲突)，清除其上的所有的activity；
+
+    ② 当前的caller是一个activity，如果设置Intent.FLAG_ACTIVITY_REORDER_TO_FRONT，这个flag表示如果启动的activity已经在当前的task中，那么如果当前启动的Intent设置了该flag，那么则会将这个activity从task中移动到top。
+
+         如果A-->B-->C-->D，D启动B时，设置了该flag，那么将变为A-->C-->D-->B
+
+         ①②两个条件，则不需要再启动新的activity，直接resume top。
+
+    ③  当前的caller是一个activity，其他情况则需要启动新的activity。
+
+⑶ 当前的caller不是activity，那么仍将新启动的activity放在top的task中。  
+
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-10.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-12.gif
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-13.gif

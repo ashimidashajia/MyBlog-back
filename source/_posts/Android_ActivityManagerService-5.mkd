@@ -133,6 +133,12 @@ public ActivityResult execStartActivity(
     IApplicationThread whoThread = (IApplicationThread) contextThread;
     Uri referrer = target != null ? target.onProvideReferrer() : null;
     ....................
+    int result = ActivityManagerNative.getDefault()
+                .startActivity(whoThread, who.getBasePackageName(), intent,
+                        intent.resolveTypeIfNeeded(who.getContentResolver()),
+                        token, target, requestCode, 0, null, options);
+    .......
+
 ```
 
 它是Activity类的startActivityForResult()方法中以下面代码所示的方法传入的：
@@ -320,13 +326,27 @@ public final int startActivity(IApplicationThread caller, String callingPackage,
 判断发起者是否是隔离的app，不允许隔离的app调用其他app。然后调用ActivityStackSupervisor类中的startActivityMayWait方法
 
 ```java
-final int startActivityMayWait(IApplicationThread caller, int callingUid,
-            String callingPackage, Intent intent, String resolvedType,
-            IVoiceInteractionSession voiceSession, IVoiceInteractor voiceInteractor,
-            IBinder resultTo, String resultWho, int requestCode, int startFlags,
-            ProfilerInfo profilerInfo, WaitResult outResult, Configuration config,
-            Bundle options, boolean ignoreTargetSecurity, int userId,
-            IActivityContainer iContainer, TaskRecord inTask) {
+final int startActivityMayWait(
+            IApplicationThread caller,//AMS通过这个参数可以和发起者进行交互
+            int callingUid,//发起者uid
+            String callingPackage,//发起者包名
+            Intent intent, // 启动activity的intent
+            String resolvedType, // intent的类型,也就是MIME type
+            IVoiceInteractionSession voiceSession,
+            IVoiceInteractor voiceInteractor,
+            IBinder resultTo,//用于接收startActivityForResult的结果,launcher启动app这种情景下没有用,为null
+            String resultWho,
+            int requestCode,//这个是调用者来定义其意义，若值大于等于0，则AMS内部保存该值并通过onActivityResult返回调用者,这里为-1
+             int startFlags,// 传入的为0
+            ProfilerInfo profilerInfo,
+            WaitResult outResult,
+            Configuration config,
+            Bundle options,
+            boolean ignoreTargetSecurity,
+            int userId,
+            IActivityContainer iContainer,  // 传入的为null
+            TaskRecord inTask)/ // 传入为null
+{
         // Refuse possible leaked file descriptors
         if (intent != null && intent.hasFileDescriptors()) {
             throw new IllegalArgumentException("File descriptors passed in Intent");
@@ -400,11 +420,32 @@ startActivityAsUser()方法最主要的目地是进行权限检查，检查发�
 
 startActivityMayWait()方法主要是利用传入的intent去向PMS搜集要启动的APP的信息,储存到aInfo中.名字中有wait字眼,预示着该方法可能导致线程等待.不过在我们这个场景中不会出现这种情况.因为wait出现在对结果的处理中,我们这个场景中是不需要处理结果的.
 
+获取到的activity信息是使用类ActivityInfo表示的,该类中记录的activity信息主要来自 AndroidManifest.xml.该xml中记录了activity的启动模式,主题,持久化能力,任务栈名称,flags等信息
+
+```java
+public class ActivityInfo extends ComponentInfo{
+
+   public int theme;
+   ...........
+   public int launchMode;
+   .........
+   public int persistableMode;
+   .........
+   public String taskAffinity;
+   ......
+  public int flags;
+  ...........
+}
+```
+
+
 接下去就调用startActivityLocked进一步处理了。
 
 到这里为止的时序图如下所示：
 
 ![][4]
+
+
 
 
 [1]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-3.png
