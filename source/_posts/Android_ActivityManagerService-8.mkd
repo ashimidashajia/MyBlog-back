@@ -1,4 +1,4 @@
----
+myc---
 layout: post
 title: Android6.0之AMS启动app中篇之创建app进程
 categories: Android底层开发
@@ -505,6 +505,7 @@ final ProcessRecord newProcessRecordLocked(ApplicationInfo info, String customPr
        if (!mBooted && !mBooting
                && userId == UserHandle.USER_OWNER
                && (info.flags & PERSISTENT_MASK) == PERSISTENT_MASK) {
+           // 如果xml中设置了persistent为true,那么这么这里也设置为true
            r.persistent = true;
        }
        // 将即将要新创建的进程名字加入到AMS的mProcessNames中
@@ -767,7 +768,6 @@ if (app.isolated) {
 mBatteryStatsService.noteProcessStart(app.processName, app.info.uid);
 
 // 如果设置该变量为true,表明该进程要一直存在,当被杀死时,要被重新唤醒.所以加入watchdog中
-// 前面在创建这个ProcessRecord时设置的是fasle
 if (app.persistent) {
 		watchdog.getInstance().processStarted(app.processName, startResult.pid);
     }
@@ -780,6 +780,8 @@ app.killed = false;
 app.killedByAm = false;
 
 synchronized (mPidsSelfLocked) {
+// 将App进程的ProcessRecord以其进程号为索引加入到AMS的mPidsSelfLocked中
+// 后续ActivityThread.main中调用AMS的attachApplicationLocked()方法会以进程号,重新拿到其ProcessRecord
 this.mPidsSelfLocked.put(startResult.pid, app);
 // 前面设置了该变量为true
 if (isActivityProcess) {
@@ -792,9 +794,11 @@ if (isActivityProcess) {
 }
 ```
 
-startProcessLocked()方法的流程是:准备好启动进程的相关参数,例如进程权等,调用Process的start()方法来启动进程.启动进程后,利用返回的信息初始化ProcessRecord,比如拿到进程pid等.
+startProcessLocked()方法的流程是:准备好启动进程的相关参数,例如进程权等,调用Process的start()方法来启动进程.启动进程后,利用返回的信息初始化ProcessRecord,比如拿到进程pid等.另外当进程需要常驻内存时,需要将其添加到watchdog中.
 
 启动进程之后,AMS给自己发送一个PROC_START_TIMEOUT_MSG消息,这个消息用来防止进程启动时间超时.如果start()方法返回结果中usingWrapper为true,超时时间设置为1200秒,否则设置为10秒.如果时间到了进程还没启动AMS将弹出ANR对话框.
+
+App进程启动后,会先执行ActivityThread.main()方法,该方法会调用AMS的attachApplicationLocked()方法,这个方法中会将这个PROC_START_TIMEOUT_MSG消息,从消息队列中移除.如果在规定的超时时间内没移除该消息,就会导致进程启动超时机制被触发.
 
 ![][1]
 

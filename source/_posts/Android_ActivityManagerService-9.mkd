@@ -1,0 +1,1166 @@
+---
+layout: post
+title: Android6.0之AMS启动App下篇
+categories: Android底层开发
+tags: [Android核心服务]
+date: 2016-07-24 16:07:08
+---
+
+前面已经分析App启动的时候，进程是如何创建的了。也知道了App进程创建之后，首先执行的是ActivityThread类中的main方法。也就是说ActivityThread.main方法是App执行代码的总入口点。
+<!--more-->
+
+### ActivityThread类
+
+在AMS启动App上篇中已经介绍过这个ActivityThread类了，这是一个非常重要的类：
+
+```java
+/**
+ * This manages the execution of the main thread in an
+ * application process, scheduling and executing activities,
+ * broadcasts, and other operations on it as the activity
+ * manager requests.
+ *
+ * {@hide}
+ */
+public final class ActivityThread {
+........
+private ContextImpl mSystemContext;
+
+static IPackageManager sPackageManager;
+// 保存该app中所有的Activity
+final ArrayMap<IBinder, ActivityClientRecord> mActivities = new ArrayMap<>();
+// 保存该app中所有的service
+final ArrayMap<IBinder, Service> mServices = new ArrayMap<>();
+// 保存该app中所有的provider
+final ArrayMap<ProviderKey, ProviderClientRecord> mProviderMap
+        = new ArrayMap<ProviderKey, ProviderClientRecord>();
+//管理应用的资源
+private final ResourcesManager mResourcesManager;
+
+// 存储包含代码，即dex文件的apk文件保存在该变量中
+final ArrayMap<String, WeakReference<LoadedApk>> mPackages
+        = new ArrayMap<String, WeakReference<LoadedApk>>();
+// 不包含代码，紧紧包含资源的apk放在该变量中
+final ArrayMap<String, WeakReference<LoadedApk>> mResourcePackages
+
+// 如果app中自己实现了Application的子类，并在清单文件中声明了，那么该变量就指向自己实现的那个子类对象
+Application mInitialApplication;
+
+AppBindData mBoundApplication;
+
+// 用于binder通信，AMS通过它来调用应用的接口
+final ApplicationThread mAppThread = new ApplicationThread();
+
+// 主线程中的Handler
+static Handler sMainThreadHandler;  // set once in main()
+
+final Looper mLooper = Looper.myLooper();
+
+// H继承自Handler,mH用来发送和处理ApplicationThread通过binder接收的AMS请求
+// 将binder转换为异步调用
+final H mH = new H();
+
+.........
+}
+```
+ActivityThread类中定义的关键数据成员可以看出他的作用了：
+
+1. 负责执行AMS的请求
+
+2. 管理应用的资源
+
+3. 管理应用所有activity，service，provider
+
+4. 创建App主线程中的looper消息处理循环
+
+
+其中mAppThread是ApplicationThread类型的，在App启动上篇分析中已经介绍过它的作用了，这个类主要用来binder通信，AMS通过它来调用ActivityThread中的一些方法。而ActivityThread中负责调用Activity等组件的生命周期方法。也就是说AMS通过这个变量来控制App中Android 组件的生命周期。
+
+H继承自Handler，在AMS通过mAppThread的代理(实际上是通过binder)发送一些处理请求，mAppThread实体端通过mH将其转换为异步处理的消息，然后由ActivityThread执行，也就是App主线程执行。也可以理解为将处理请求的代码从binder线程切换到App主线程.可以参考《App启动上篇》中对其的分析。
+
+### ActivityThread.main方法
+
+这个main方法是Android app的入口点。ActivityThread的相关初始化，也是在main方法里面完成的。
+
+ActivityThread并没有像其名字那样是一个线程类，它仅仅是App主线程中使用的一个类而已。App主线程执行这个类的mian方法，其main方法是一个死循环：looper消息处理循环。
+
+```java
+public static void main(String[] args) {
+      Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "ActivityThreadMain");
+      SamplingProfilerIntegration.start();
+      CloseGuard.setEnabled(false);
+
+      // 环境初始化，主要是app运行过程中需要使用到的系统路径
+      // 比如外部存储路径等等
+      Environment.initForCurrentUser();
+
+      // Set the reporter for event logging in libcore
+      EventLogger.setReporter(new EventLoggingReporter());
+      //增加一个保存key的provider
+      AndroidKeyStoreProvider.install();
+
+      // 为应用社会当前用户的CA证书保存的位置
+      final File configDir = Environment.getUserConfigDirectory(UserHandle.myUserId());
+      TrustedCertificateStore.setDefaultUserDirectory(configDir);
+      // 设置app进程的名字
+      // 通过前面的分析可知，前面的过程中已经设置过名字了，这里又改为了“pre-initialized”,不知道为啥，
+      // 因为后面还要在调用该方法，重新设置进程名字为app 包名或者app指定的名字。
+      Process.setArgV0("<pre-initialized>");
+      // 创建主线程looper
+      Looper.prepareMainLooper();
+      // 创建ActivityThread对象。
+      ActivityThread thread = new ActivityThread();
+      // 将创建的ActivityThread附加到AMS中，这样
+      // AMS就可以控制这个app中组件的生命周期了
+      thread.attach(false);
+
+      if (sMainThreadHandler == null) {
+          sMainThreadHandler = thread.getHandler();
+      }
+
+      if (false) {
+          Looper.myLooper().setMessageLogging(new
+                  LogPrinter(Log.DEBUG, "ActivityThread"));
+      }
+
+      // End of event ActivityThreadMain.
+      Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+      //App主线程开始执行消息处理循环
+      Looper.loop();
+
+      throw new RuntimeException("Main thread loop unexpectedly exited");
+  }
+}
+```
+其构造方法：
+
+```java
+ActivityThread() {
+      mResourcesManager = ResourcesManager.getInstance();
+  }
+```
+主要是创建资源管理对象，资源管理后续单独分析其源码，这里不多说了。
+
+当ActivityThread对象创建之后，就开始调用其attach()方法。这是一个很重要的方法,参数为false表明是普通app进程：
+
+```java
+private void attach(boolean system)
+{
+        sCurrentActivityThread = this;
+        mSystemThread = system;
+        // app进程传入fasle
+        if (!system) {
+            ViewRootImpl.addFirstDrawHandler(new Runnable() {
+                @Override
+                public void run() {
+                    ensureJitEnabled();
+                }
+            });
+            android.ddm.DdmHandleAppName.setAppName("<pre-initialized>",
+                                                    UserHandle.myUserId());
+            // mAppThread是ApplicationThread对象；
+            // 下面这个方法会把mAppThread放到RuntimeInit类中的静态变量mApplicationObject中
+            RuntimeInit.setApplicationObject(mAppThread.asBinder());
+            final IActivityManager mgr = ActivityManagerNative.getDefault();
+            try {
+                // 执行AMS的attachApplication方法
+                // 将mAppThread传入AMS，这样AMS就可以通过它来控制app了
+                mgr.attachApplication(mAppThread);
+            } catch (RemoteException ex) {
+                // Ignore
+            }
+            // Watch for getting close to heap limit.
+            BinderInternal.addGcWatcher(new Runnable() {
+              ............
+            });
+        } else {
+          ..............
+        }
+
+        // add dropbox logging to libcore
+        DropBox.setReporter(new DropBoxReporter());
+
+        ViewRootImpl.addConfigCallback(new ComponentCallbacks2() {
+          .......
+        });
+    }
+```
+
+其中RuntimeInit.setApplicationObject方法如下：
+
+```java
+/**
+    * Set the object identifying this application/process, for reporting VM
+    * errors.
+    */
+   public static final void setApplicationObject(IBinder app) {
+       mApplicationObject = app;
+   }
+
+```
+注释已经说得很清楚了，主要是VM用来报告错误使用的。
+
+### AMS的attachApplication()方法
+
+这个方法主要负App和AMS的绑定.
+
+```java
+public final void attachApplication(IApplicationThread thread) {
+        synchronized (this) {
+            int callingPid = Binder.getCallingPid();
+            final long origId = Binder.clearCallingIdentity();
+            attachApplicationLocked(thread, callingPid);
+            Binder.restoreCallingIdentity(origId);
+        }
+    }
+```
+attachApplication()方法内部又调用了attachApplicationLocked()方法：
+
+```java
+private final boolean attachApplicationLocked(IApplicationThread thread,
+            int pid) {
+        ProcessRecord app;
+        if (pid != MY_PID && pid >= 0) {
+            synchronized (mPidsSelfLocked) {
+              // 在创建startProcessLocked()方法中调用Process.start()方法创建进程后
+              // 会以接收传递过来的进程号为索引,将ProcessRecord加入到AMS的mPidsSelfLocked中
+              // 这里可以以进程号从mPidsSelfLocked中拿到ProcessRecord
+                app = mPidsSelfLocked.get(pid);
+            }
+        } else {
+            app = null;
+        }
+if (app == null) {
+          ........
+            return false;
+        }
+if (app.thread != null) {
+       handleAppDiedLocked(app, true, true);
+   }
+
+   // 注册app进程死亡通知处理机制,也就是创建监听app死亡的对象
+   // App进程死亡后,会调用AppDeathRecipient.binderDied()方法
+   final String processName = app.processName;
+   try {
+       AppDeathRecipient adr = new AppDeathRecipient(
+               app, pid, thread);
+       thread.asBinder().linkToDeath(adr, 0);
+       app.deathRecipient = adr;
+   } catch (RemoteException e) {
+       app.resetPackageList(mProcessStats);
+       startProcessLocked(app, "link fail", processName);
+       return false;
+   }
+   //调用ProcessStatsService开始记录process的状态
+   //该方法中将thread赋值给app.thread
+   app.makeActive(thread, mProcessStats);
+   // 初始化App进程优先级等信息
+   app.curAdj = app.setAdj = -100;
+   app.curSchedGroup = app.setSchedGroup = Process.THREAD_GROUP_DEFAULT;
+   app.forcingToForeground = null;
+   updateProcessForegroundLocked(app, false, false);
+   app.hasShownUi = false;
+   app.debugging = false;
+   app.cached = false;
+   app.killedByAm = false;
+   // 移除PROC_START_TIMEOUT_MSG消息
+   // 前面在AMS.startProcessLocked方法中会在调用Process.start()方法之后,将这个消息放入消息队列中
+   // 如果没有在规定的时间内将该消息移除消息队列,那么会导致进程启动超时
+   mHandler.removeMessages(PROC_START_TIMEOUT_MSG, app);
+
+   // mProcessesReady为true
+   boolean normalMode = mProcessesReady || isAllowedWhileBooting(app.info);
+   // 拿到App的provider
+   List<ProviderInfo> providers = normalMode ? generateApplicationProvidersLocked(app) : null;
+   ........
+   // If the app is being launched for restore or full backup, set it up specially
+   boolean isRestrictedBackupMode = false;
+   if (mBackupTarget != null && mBackupAppName.equals(processName)) {
+       isRestrictedBackupMode = (mBackupTarget.backupMode == BackupRecord.RESTORE)
+               || (mBackupTarget.backupMode == BackupRecord.RESTORE_FULL)
+               || (mBackupTarget.backupMode == BackupRecord.BACKUP_FULL);
+   }
+   // 判断是否需要执行dex2oat命令
+   // 在app安装的时候,会执行一次dex2oat
+   // 当生成的oat文件被破外或者删除的时候,需要重新执行dex2oat
+   ensurePackageDexOpt(app.instrumentationInfo != null
+                    ? app.instrumentationInfo.packageName
+                    : app.info.packageName);
+    //  instrument app 技术先关
+    // 比如Android studio  开发时,修改某些代码时,没必要重新安装apk,即可查看之后的结果
+    // 后续单独在分析instrument技术
+    if (app.instrumentationClass != null) {
+          ensurePackageDexOpt(app.instrumentationClass.getPackageName());
+    }
+    ....
+    // 调用ApplicationThread的bindApplication接口
+    thread.bindApplication(processName, appInfo, providers, app.instrumentationClass,
+                   profilerInfo, app.instrumentationArguments, app.instrumentationWatcher,
+                   app.instrumentationUiAutomationConnection, testMode, enableOpenGlTrace,
+                   isRestrictedBackupMode || !normalMode, app.persistent,
+                   new Configuration(mConfiguration), app.compat,
+                   getCommonServicesLocked(app.isolated),
+                   mCoreSettingsObserver.getCoreSettingsLocked());
+           updateLruProcessLocked(app, false, null);
+           app.lastRequestedGc = app.lastLowMemory = SystemClock.uptimeMillis();
+       } catch (Exception e) {
+          ............
+           return false;
+       }
+    ....
+    boolean badApp = false;
+    boolean didSomething = false;
+// See if the top visible activity is waiting to run in this process...
+// 为true
+    if (normalMode) {
+        try {
+            // 执行ActivityStackSupervisor.attachApplicationLocked
+            if (mStackSupervisor.attachApplicationLocked(app)) {
+                didSomething = true;
+            }
+        } catch (Exception e) {
+            Slog.wtf(TAG, "Exception thrown launching activities in " + app, e);
+            badApp = true;
+        }
+    }
+    // Find any services that should be running in this process...
+    if (!badApp) {
+        try {
+            // 处理要运行这个进程中的service
+            didSomething |= mServices.attachApplicationLocked(app, processName);
+        } catch (Exception e) {
+            Slog.wtf(TAG, "Exception thrown starting services in " + app, e);
+            badApp = true;
+        }
+    }
+
+    // Check if a next-broadcast receiver is in this process...
+    if (!badApp && isPendingBroadcastProcessLocked(pid)) {
+        try {
+            // 处理广播
+            didSomething |= sendPendingBroadcastsLocked(app);
+        } catch (Exception e) {
+            // If the app died trying to launch the receiver we declare it 'bad'
+            Slog.wtf(TAG, "Exception thrown dispatching broadcasts in " + app, e);
+            badApp = true;
+        }
+    }
+    ........
+    if (!didSomething) {
+           updateOomAdjLocked();
+       }
+
+       return true;
+}
+```
+
+attachApplicationLocked函数比较长，首先以传入的app进程号为索引从AMS的mPidsSelfLocked中取出app进程的ProcessRecord对象.然后调用ProcessRecord对象的makeActive方法调用ProcessStatsService开始记录process的状态,接着将PROC_START_TIMEOUT_MSG消息,从消息循环中移除,检查是否重新执行dex2oat生成app的oat文件。后面主要做了四件事情：
+
+1. 是调用ActivityThread的bindApplication方法去启动Application；
+
+2. 是调用ActivityStackSupervisor的attachApplicationLocked()方法去启动ActivityStack栈顶的Activity；
+
+3. 是ActiveServices调用的attachApplicationLocked()方法启动在当前App进程中的service；
+
+4. 是检查是否有广播broadcast到这个application，如果有则广播。
+
+上面全部过程的时序图如下:
+
+![图1][1]
+
+
+
+### ApplicationThread.bindApplication()方法
+
+接下来重点分析bindApplication()方法.这个方法最终效果是调用了App的Application对象的onCreate方法.这是还还没启动activity.
+
+```java
+public final void bindApplication(
+                String processName, //ProcessRecord中记录的进程名字
+                ApplicationInfo appInfo,
+                List<ProviderInfo> providers, // app中的providers
+                ComponentName instrumentationName,
+                ProfilerInfo profilerInfo,
+                Bundle instrumentationArgs, //测试相关
+                IInstrumentationWatcher instrumentationWatcher,
+                IUiAutomationConnection instrumentationUiConnection, int debugMode,
+                boolean enableOpenGlTrace, boolean isRestrictedBackupMode, boolean persistent,
+                Configuration config, CompatibilityInfo compatInfo, Map<String, IBinder> services,
+                Bundle coreSettings) {
+
+            if (services != null) {
+                // Setup the service cache in the ServiceManager
+                ServiceManager.initServiceCache(services);
+            }
+
+            // 发送SET_CORE_SETTINGS消息
+            // 获取系统的设定并设置到ActivityThread中
+            setCoreSettings(coreSettings);
+
+            // 拿到PMS
+            IPackageManager pm = getPackageManager();
+            android.content.pm.PackageInfo pi = null;
+            try {
+                // 以包名从PMS中获得PackageInfo
+                pi = pm.getPackageInfo(appInfo.packageName, 0, UserHandle.myUserId());
+            } catch (RemoteException e) {
+            }
+            if (pi != null) {
+                // 该app是否设置了共享uid
+                boolean sharedUserIdSet = (pi.sharedUserId != null);
+                // app进程名字是否被设定为与包名不一致
+                // 默认情况下,app进程名字就是其包名
+                // 当显示设置process name 的时候可以执行进程的名字
+                boolean processNameNotDefault =
+                (pi.applicationInfo != null &&
+                 !appInfo.packageName.equals(pi.applicationInfo.processName));
+
+                // 如果设置了共享uid或者进程名字设置为了其他名字,
+                // 这就导致该app可能运行在一个已经运行的进程中
+                boolean sharable = (sharedUserIdSet || processNameNotDefault);
+
+                // 如果app是单独的进程,那么要想VM注册相关信息
+                // 是就上就在/data/dalvik-cache/profiles/创建一个以包名为名字的空文件,另外两个参数没用到
+                if (!sharable) {
+                    VMRuntime.registerAppInfo(appInfo.packageName, appInfo.dataDir,
+                                            appInfo.processName);
+                }
+            }
+            // 创建兵初始化AppBindData对象
+            // 在这里设置了进程名字,app的provider,ApplicationInfo
+            AppBindData data = new AppBindData();
+            data.processName = processName;
+            data.appInfo = appInfo;
+            data.providers = providers;
+            // 测试相关
+            data.instrumentationName = instrumentationName;
+            data.instrumentationArgs = instrumentationArgs;
+            data.instrumentationWatcher = instrumentationWatcher;
+            data.instrumentationUiAutomationConnection = instrumentationUiConnection;
+            data.debugMode = debugMode;
+            data.enableOpenGlTrace = enableOpenGlTrace;
+            // 是否允许adb backup
+            data.restrictedBackupMode = isRestrictedBackupMode;
+            // 进程是否常驻内存,杀掉后,会被重启
+            data.persistent = persistent;
+            data.config = config;
+            data.compatInfo = compatInfo;
+            data.initProfilerInfo = profilerInfo;
+            // 发送BIND_APPLICATION消息
+            sendMessage(H.BIND_APPLICATION, data);
+        }
+```
+bindApplication()方法要通过PMS检查启动的app是否设置了共享uid,以及检查当前app进程的名字是否设定的与包名不一致.符合两者中的任一种情况下,该app进程可能运行在另一个已经存在的进程中.这时不需要执行VMRuntime.registerAppInfo()向虚拟机注册app信息.所谓的向虚拟机注册信息,目前Android版本仅仅是在
+
+```shell
+/data/dalvik-cache/profiles/
+```
+中创建一个以包名为名字的空文件而已.因为该app和其他进程共享时,其进程名字肯定不是包名了,所以无需注册.
+
+bindApplication()方法主要是创建和初始化了AppBindData对象(这里还没有初始化AppBindData中的 LoadedApk info字段),并发送两个消息，一个是SET_CORE_SETTINGS；另一个是BIND_APPLICATION。SET_CORE_SETTINGS主要是获取系统的设定并设置到ActivityThread中。BIND_APPLICATION用于启动App并安装所有的provider，并回调App的oncreate方法BIND_APPLICATION消息.
+
+
+### ActivityThread.handleBindApplication()方法
+
+ActivityThread中处理BIND_APPLICATION消息的方法是handleBindApplication():
+
+```java
+
+    private void handleBindApplication(AppBindData data) {
+        mBoundApplication = data;
+       .......
+
+        // 设置进程的名字,因为前面ActivityThread.main将其设置为了"<pre-initialized>"
+        Process.setArgV0(data.processName);
+        // 设置app在ddms中显示的进程名字
+        android.ddm.DdmHandleAppName.setAppName(data.processName,
+                                                UserHandle.myUserId());
+        // 普通app进程,一般情况下为false
+        // 除非xml设置persistent为true   
+        // 带有persistent标记的进程在低内存设备中部支持使用硬件加速                                 
+        if (data.persistent) {
+            if (!ActivityManager.isHighEndGfx()) {
+                HardwareRenderer.disable(false);
+            }
+        }
+
+        if (mProfiler.profileFd != null) {
+            mProfiler.startProfiling();
+        }
+
+        // 根据app编译时指定的sdk版本与当前系统sdk版本设置AsyncTask
+        if (data.appInfo.targetSdkVersion <= android.os.Build.VERSION_CODES.HONEYCOMB_MR1) {
+            AsyncTask.setDefaultExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
+        }
+
+        Message.updateCheckRecycle(data.appInfo.targetSdkVersion);
+
+        // 恢复时区和位置信息
+        TimeZone.setDefault(null);
+        Locale.setDefault(data.config.locale);
+        // 资源管理初始化设置
+        mResourcesManager.applyConfigurationToResourcesLocked(data.config, data.compatInfo);
+        mCurDefaultDisplayDpi = data.config.densityDpi;
+        applyCompatConfiguration(mCurDefaultDisplayDpi);
+
+        // 设置AppBindData中LoadedApk info属性字段
+        // 这里会根据传入app的ActivityInfo和CompatibilityInfo创建一个LoadedApk对象
+        data.info = getPackageInfoNoCheck(data.appInfo, data.compatInfo);
+
+        // 如果应用没有指定使用设备的density,那么默认使用mdpi
+        if ((data.appInfo.flags&ApplicationInfo.FLAG_SUPPORTS_SCREEN_DENSITIES)
+                == 0) {
+            mDensityCompatMode = true;
+            Bitmap.setDefaultDensity(DisplayMetrics.DENSITY_DEFAULT);
+        }
+        updateDefaultDensity();
+        // 创建ContextImpl上下文,里面也设计到了资源管理相关的内容 ,如从LoadedApk中提取资源
+        // 后续还需对其进行初始化
+        final ContextImpl appContext = ContextImpl.createAppContext(this, data.info);
+        // 普通app启动时,isIsolated为false
+        if (!Process.isIsolated()) {
+            //在沙箱目录中创建cache文件夹
+            final File cacheDir = appContext.getCacheDir();
+
+            if (cacheDir != null) {
+                //将创建的cache文件夹与属性"java.io.tmpdir"关联
+                System.setProperty("java.io.tmpdir", cacheDir.getAbsolutePath());
+            } else {
+                Log.v(TAG, "Unable to initialize \"java.io.tmpdir\" property due to missing cache directory");
+            }
+
+            // Use codeCacheDir to store generated/compiled graphics code
+            // 在沙箱目录创建code-cache文件夹
+            final File codeCacheDir = appContext.getCodeCacheDir();
+            if (codeCacheDir != null) {
+                setupGraphicsSupport(data.info, codeCacheDir);
+            } else {
+                Log.e(TAG, "Unable to setupGraphicsSupport due to missing code-cache directory");
+            }
+        }
+
+        // 设置时间格式
+        final boolean is24Hr = "24".equals(mCoreSettings.getString(Settings.System.TIME_12_24));
+        DateFormat.set24HourTimePref(is24Hr);
+        View.mDebugViewAttributes =
+                mCoreSettings.getInt(Settings.Global.DEBUG_VIEW_ATTRIBUTES, 0) != 0;
+
+        // 调试相关
+        if ((data.appInfo.flags &
+             (ApplicationInfo.FLAG_SYSTEM |
+              ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0) {
+            StrictMode.conditionallyEnableDebugLogging();
+        }
+
+        if (data.appInfo.targetSdkVersion > 9) {
+            StrictMode.enableDeathOnNetwork();
+        }
+
+        NetworkSecurityPolicy.getInstance().setCleartextTrafficPermitted(
+                (data.appInfo.flags & ApplicationInfo.FLAG_USES_CLEARTEXT_TRAFFIC) != 0);
+
+        if (data.debugMode != IApplicationThread.DEBUG_OFF) {
+          ............
+        }
+
+        // Enable OpenGL tracing if required
+        if (data.enableOpenGlTrace) {
+            GLUtils.setTracingLevel(1);
+        }
+
+        // Allow application-generated systrace messages if we're debuggable.
+        boolean appTracingAllowed = (data.appInfo.flags&ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        Trace.setAppTracingAllowed(appTracingAllowed);
+
+        /**
+         * Initialize the default http proxy in this process for the reasons we set the time zone.
+         */
+        IBinder b = ServiceManager.getService(Context.CONNECTIVITY_SERVICE);
+        if (b != null) {
+            IConnectivityManager service = IConnectivityManager.Stub.asInterface(b);
+            try {
+              // 设置网络代理
+                final ProxyInfo proxyInfo = service.getProxyForNetwork(null);
+                Proxy.setHttpProxySystemProperty(proxyInfo);
+            } catch (RemoteException e) {}
+        }
+        // 为null
+        if (data.instrumentationName != null) {
+          ..........
+        } else {
+          // 创建Instrumentation对象
+            mInstrumentation = new Instrumentation();
+        }
+        if ((data.appInfo.flags&ApplicationInfo.FLAG_LARGE_HEAP) != 0) {
+            dalvik.system.VMRuntime.getRuntime().clearGrowthLimit();
+        } else {
+            dalvik.system.VMRuntime.getRuntime().clampGrowthLimit();
+        }
+        final StrictMode.ThreadPolicy savedPolicy = StrictMode.allowThreadDiskWrites();
+        try {
+            // 创建app的Application对象
+            Application app = data.info.makeApplication(data.restrictedBackupMode, null);
+            mInitialApplication = app;
+
+            // don't bring up providers in restricted mode; they may depend on the
+            // app's custom Application class
+            if (!data.restrictedBackupMode) {
+                List<ProviderInfo> providers = data.providers;
+                if (providers != null) {
+                    installContentProviders(app, providers);
+                    // For process that contains content providers, we want to
+                    // ensure that the JIT is enabled "at some point".
+                    mH.sendEmptyMessageDelayed(H.ENABLE_JIT, 10*1000);
+                }
+            }
+
+            // Do this after providers, since instrumentation tests generally start their
+            // test thread at this point, and we don't want that racing.
+            try {
+              // 执行instrumentation的onCreate()方法
+                mInstrumentation.onCreate(data.instrumentationArgs);
+            }
+            catch (Exception e) {
+              ................
+            }
+            // 执行Application的onCreate生命周期方法
+            try {
+                mInstrumentation.callApplicationOnCreate(app);
+            } catch (Exception e) {
+                ...............
+            }
+        } finally {
+            StrictMode.setThreadPolicy(savedPolicy);
+        }
+    }
+
+```
+
+handleBindApplication()方法中做了:
+
+1. 确定了进程的最终名字,以及其在ddms中显示的进程名字
+
+2. 恢复进程的时区和位置信息
+
+3. 调用getPackageInfoNoCheck()创建LoadApk对象
+
+4. 创建ContextImpl对象,是AppContext
+
+5. 设置网络代理
+
+6. 创建Instrumentation对象.
+
+使用Instrumentation， 你可以在app启动之前，创建模拟的系统对象，如Context；控制应用程序的多个生命周期；发送UI事件给应用程序；在执行期间检查程序状态。
+
+7. 创建app的Applicaition对象
+
+8. 执行Instrumentation.onCreate()方法
+
+9. 执行app的Application对象的onCreate()方法.
+
+### LoadedApk
+
+LoadedApk类用来描述一个被被加载运行的APK,记录其代码,资源等信息.
+
+```java
+public final class LoadedApk {
+
+    private static final String TAG = "LoadedApk";
+
+    private final ActivityThread mActivityThread; // App的ActivityThread对象
+    private ApplicationInfo mApplicationInfo;   // 描述App信息的ApplicationInfo,如果App中重载了Application类,那么其类名会被记录在ApplicationInfo中
+    final String mPackageName;// app的包名
+    private final String mAppDir;// app在/data/app/<包名>路径
+    private final String mResDir;// 资源路径
+    private final String[] mSplitAppDirs;
+    private final String[] mSplitResDirs;
+    private final String[] mOverlayDirs;
+    private final String[] mSharedLibraries;// 共享java库
+    private final String mDataDir;//数据沙箱目录
+    private final String mLibDir;// native so库位置
+    private final File mDataDirFile;
+    private final ClassLoader mBaseClassLoader;//getPackageInfoNoCheck()创建的LoadedApk对象中该字段初始化为null
+    private final boolean mSecurityViolation;
+    private final boolean mIncludeCode;// 这个apk是否包含dex
+    private final boolean mRegisterPackage;
+    private final DisplayAdjustments mDisplayAdjustments = new DisplayAdjustments();
+    Resources mResources;
+    private ClassLoader mClassLoader;//
+    private Application mApplication;// 这个app的Application对象,如果App继承了Application,那么为其子类对象
+
+    private final ArrayMap<Context, ArrayMap<BroadcastReceiver, ReceiverDispatcher>> mReceivers
+        = new ArrayMap<Context, ArrayMap<BroadcastReceiver, LoadedApk.ReceiverDispatcher>>();
+    private final ArrayMap<Context, ArrayMap<BroadcastReceiver, LoadedApk.ReceiverDispatcher>> mUnregisteredReceivers
+        = new ArrayMap<Context, ArrayMap<BroadcastReceiver, LoadedApk.ReceiverDispatcher>>();
+    private final ArrayMap<Context, ArrayMap<ServiceConnection, LoadedApk.ServiceDispatcher>> mServices
+        = new ArrayMap<Context, ArrayMap<ServiceConnection, LoadedApk.ServiceDispatcher>>();
+    private final ArrayMap<Context, ArrayMap<ServiceConnection, LoadedApk.ServiceDispatcher>> mUnboundServices
+        = new ArrayMap<Context, ArrayMap<ServiceConnection, LoadedApk.ServiceDispatcher>>();
+
+    int mClientCount = 0;
+
+    Application getApplication() {
+        return mApplication;
+    }
+    ...........
+```
+
+LoadedApk是一个非常重要的类,是一个运行的apk在AMS中的管理对象.要清楚地直到何时创建这个对象.
+
+通过前面分析可知,是在handleBindApplication()方法中通过调用getPackageInfoNoCheck()方法创建LoadedApk对象的.
+
+```java
+public final LoadedApk getPackageInfoNoCheck(ApplicationInfo ai,
+            CompatibilityInfo compatInfo) {
+        return getPackageInfo(ai, compatInfo, null, false, true, false);
+    }
+```
+可知实际上调用的是getPackageInfo()方法:
+
+```java
+private LoadedApk getPackageInfo(
+            ApplicationInfo aInfo, // app的Application信息
+            CompatibilityInfo compatInfo, // 兼容性
+            ClassLoader baseLoader,// 传入null
+            boolean securityViolation,// 传入false
+            boolean includeCode,// 传入true
+            boolean registerPackage // 传入false
+            ) {
+// 要启动app的拥有者与当前系统用户不一致
+final boolean differentUser = (UserHandle.myUserId() != UserHandle.getUserId(aInfo.uid));
+synchronized (mResourcesManager) {
+    WeakReference<LoadedApk> ref;
+    if (differentUser) {
+        ref = null;
+    } else if (includeCode) {
+        // 如果包含了dex,那么从ActivityThread.mPackages中先查找是否已经有了apk对应的LoadedApk
+        ref = mPackages.get(aInfo.packageName);
+    } else {
+      // 如果没有包含了dex,那么从ActivityThread.mResourcePackages中先查找是否已经有了apk对应的LoadedApk
+        ref = mResourcePackages.get(aInfo.packageName);
+    }
+    // 如果前面已经从mPackages或者mResourcePackages中找到了apk对应的LoadedApk,那么就可以直接返回了
+    // 没有找到的话,就要创建LoadedApk对象了
+    if (packageInfo == null || (packageInfo.mResources != null
+         && !packageInfo.mResources.getAssets().isUpToDate())) {
+
+      // 创建LoadedApk对象
+     packageInfo =
+         new LoadedApk(this, aInfo, compatInfo, baseLoader,
+                 securityViolation, includeCode &&
+                 (aInfo.flags&ApplicationInfo.FLAG_HAS_CODE) != 0, registerPackage);
+
+     if (mSystemThread && "android".equals(aInfo.packageName)) {
+         packageInfo.installSystemApplicationInfo(aInfo,
+                 getSystemContext().mPackageInfo.getClassLoader());
+     }
+
+     // 创建LoadedApk对象之后,将其加入对应的缓存列表中
+     if (differentUser) {
+         // Caching not supported across users
+     } else if (includeCode) {
+         mPackages.put(aInfo.packageName,
+                 new WeakReference<LoadedApk>(packageInfo));
+     } else {
+         mResourcePackages.put(aInfo.packageName,
+                 new WeakReference<LoadedApk>(packageInfo));
+     }
+  }
+  return packageInfo;
+}
+
+}
+```
+
+由以上代码可知,当要获取一个LoadedApk对象时,先从ActivityThread的两个缓存列表:mPackages和mResourcePackages中寻找,没找到的话,才会新建LoadedApk对象,然后将其加入对应的缓存列表中.
+
+其构造方法:
+
+```java
+public LoadedApk(ActivityThread activityThread, ApplicationInfo aInfo,
+            CompatibilityInfo compatInfo, ClassLoader baseLoader,// 传入的为null
+            boolean securityViolation, boolean includeCode, boolean registerPackage) {
+        final int myUid = Process.myUid();
+        aInfo = adjustNativeLibraryPaths(aInfo);
+
+        mActivityThread = activityThread;
+        mApplicationInfo = aInfo;
+        mPackageName = aInfo.packageName;
+        mAppDir = aInfo.sourceDir;
+        mResDir = aInfo.uid == myUid ? aInfo.sourceDir : aInfo.publicSourceDir;
+        mSplitAppDirs = aInfo.splitSourceDirs;
+        mSplitResDirs = aInfo.uid == myUid ? aInfo.splitSourceDirs : aInfo.splitPublicSourceDirs;
+        mOverlayDirs = aInfo.resourceDirs;
+        mSharedLibraries = aInfo.sharedLibraryFiles;
+        mDataDir = aInfo.dataDir;
+        mDataDirFile = mDataDir != null ? new File(mDataDir) : null;
+        mLibDir = aInfo.nativeLibraryDir;
+        mBaseClassLoader = baseLoader;//传入的为null
+        mSecurityViolation = securityViolation;
+        mIncludeCode = includeCode;
+        mRegisterPackage = registerPackage;
+        mDisplayAdjustments.setCompatibilityInfo(compatInfo);
+    }
+```
+
+### ContextImpl
+
+当找到apk对应的LoadedApk对象后,以此为参数创建Application的Context:
+
+```java
+  final ContextImpl appContext = ContextImpl.createAppContext(this, data.info);
+```
+
+```java
+static ContextImpl createAppContext(ActivityThread mainThread, LoadedApk packageInfo) {
+     if (packageInfo == null) throw new IllegalArgumentException("packageInfo");
+     return new ContextImpl(null, mainThread,
+             packageInfo, null, null, false, null, null, Display.INVALID_DISPLAY);
+ }
+
+private ContextImpl(
+        ContextImpl container, // 传入null
+        ActivityThread mainThread,// app的ActivityThread对象
+        LoadedApk packageInfo, // apk对应的LoadedApk对象
+        IBinder activityToken, // 传入为null
+        UserHandle user, boolean restricted,
+        Display display, Configuration overrideConfiguration, int createDisplayWithId) {
+    mOuterContext = this;
+
+    mMainThread = mainThread;
+    mActivityToken = activityToken;
+    mRestricted = restricted;
+
+    if (user == null) {
+        user = Process.myUserHandle();
+    }
+    mUser = user;
+    // context中会记录apk对应的LoadedApk对象
+    mPackageInfo = packageInfo;
+    // 资源管理相关,后续单独开篇介绍
+    mResourcesManager = ResourcesManager.getInstance();
+    ..............
+
+    Resources resources = packageInfo.getResources(mainThread);
+    if (resources != null) {
+        if (displayId != Display.DEFAULT_DISPLAY
+                || overrideConfiguration != null
+                || (compatInfo != null && compatInfo.applicationScale
+                        != resources.getCompatibilityInfo().applicationScale)) {
+            resources = mResourcesManager.getTopLevelResources(packageInfo.getResDir(),
+                    packageInfo.getSplitResDirs(), packageInfo.getOverlayDirs(),
+                    packageInfo.getApplicationInfo().sharedLibraryFiles, displayId,
+                    overrideConfiguration, compatInfo);
+        }
+    }
+    mResources = resources;
+
+    if (container != null) {
+        mBasePackageName = container.mBasePackageName;
+        mOpPackageName = container.mOpPackageName;
+    } else {
+        // 记录app包名
+        mBasePackageName = packageInfo.mPackageName;
+        ApplicationInfo ainfo = packageInfo.getApplicationInfo();
+        if (ainfo.uid == Process.SYSTEM_UID && ainfo.uid != Process.myUid()) {
+            mOpPackageName = ActivityThread.currentPackageName();
+        } else {
+            mOpPackageName = mBasePackageName;
+        }
+    }
+    // 内容提供者相关
+    mContentResolver = new ApplicationContentResolver(this, mainThread, user);
+}
+```
+
+### Instrumentation.onCreate()方法
+
+```java
+public void onCreate(Bundle arguments) {
+    }
+```
+方法为空.
+
+### Instrumentation.callApplicationOnCreate()方法
+```java
+public void callApplicationOnCreate(Application app) {
+        app.onCreate();
+}
+```
+可知调用的是Application类的onCreate()方法,如果App实现了其子类,那么调用的就是其子类中的onCreate()方法.
+
+bindApplication()方法关键时序图:
+
+![][4]
+
+在这个方法中创建了Classloader,以及Application对象。然后执行Application对象的attach方法，这个方法中又会调用attachBaseContext()方法。也就是说Application对象首先被执行的方法不是onCreate()方法，而是attach()方法。
+
+### ActivityStackSupervisor.attachApplicationLocked()方法
+
+从图1中ActivityThread.main的整体执行时序图中可知,启动activity的是attachApplicationLocked()方法:
+
+```java
+    boolean attachApplicationLocked(ProcessRecord app) throws RemoteException {
+        final String processName = app.processName;
+        boolean didSomething = false;
+        for (int displayNdx = mActivityDisplays.size() - 1; displayNdx >= 0; --displayNdx) {
+            ArrayList<ActivityStack> stacks = mActivityDisplays.valueAt(displayNdx).mStacks;
+            for (int stackNdx = stacks.size() - 1; stackNdx >= 0; --stackNdx) {
+                final ActivityStack stack = stacks.get(stackNdx);
+                // 从 如何启动app中篇之Task的管理 可知,此时mFocusedStack指向即将要运行的activity所在的ActivityStack
+                // 下面这个方法就是为了从众多ActivityStack找到这个ActivityStack
+                if (!isFrontStack(stack)) {
+                    continue;
+                }
+                // 找到了所需的ActivityStack
+                // 然后找到其栈顶的Activity,实际就是mTaskHistory数组末端的Task的顶端Activity
+                ActivityRecord hr = stack.topRunningActivityLocked(null);
+                if (hr != null) {
+                    if (hr.app == null && app.uid == hr.info.applicationInfo.uid
+                            && processName.equals(hr.processName)) {
+                        try {
+                            if (realStartActivityLocked(hr, app, true, true)) {
+                                didSomething = true;
+                            }
+                        } catch (RemoteException e) {
+                            Slog.w(TAG, "Exception in new application when starting activity "
+                                  + hr.intent.getComponent().flattenToShortString(), e);
+                            throw e;
+                        }
+                    }
+                }
+            }
+        }
+        if (!didSomething) {
+            ensureActivitiesVisibleLocked(null, 0);
+        }
+        return didSomething;
+    }
+
+```
+
+### ActivityStackSupervisor.realStartActivityLocked()方法
+
+```java
+    final boolean realStartActivityLocked(
+            ActivityRecord r,// 要启动的Activity
+            ProcessRecord app, // Activity所要运行在的进程
+            boolean andResume, // 传入true
+            boolean checkConfig)// 传入true
+            throws RemoteException {
+
+      .................
+
+        // 将代表activity运行的进程的ProcessRecord对象加入ActivityRecord.app
+        r.app = app;
+        app.waitingToKill = null;
+        r.launchCount++;
+        // 记录启动时间
+        r.lastLaunchTime = SystemClock.uptimeMillis();
+
+        if (DEBUG_ALL) Slog.v(TAG, "Launching: " + r);
+
+        // 将这个activity加入到ProcessRecord.activities中
+        int idx = app.activities.indexOf(r);
+        if (idx < 0) {
+            app.activities.add(r);
+        }
+        // 更新进程优先级,后续单独介绍进程管理
+        mService.updateLruProcessLocked(app, true, null);
+        mService.updateOomAdjLocked();
+
+        ..............
+        final ActivityStack stack = task.stack;
+        try {
+            .........
+            List<ResultInfo> results = null;
+            List<ReferrerIntent> newIntents = null;
+            //
+            if (andResume) {
+                results = r.results;
+                newIntents = r.newIntents;
+            }
+          ...........
+            // 保证运行的app已经之兴国dex2oat
+            mService.ensurePackageDexOpt(r.intent.getComponent().getPackageName());
+            r.sleeping = false;
+            r.forceNewConfig = false;
+            mService.showAskCompatModeDialogLocked(r);
+            // 得到Activity的兼容性信息
+            r.compat = mService.compatibilityInfoForPackageLocked(r.info.applicationInfo);
+            ProfilerInfo profilerInfo = null;
+            if (mService.mProfileApp != null && mService.mProfileApp.equals(app.processName)) {
+              .................
+            }
+
+            if (andResume) {
+                app.hasShownUi = true;
+                app.pendingUiClean = true;
+            }
+            // 设置进程状态为ActivityManager.PROCESS_STATE_TOP
+            app.forceProcessStateUpTo(mService.mTopProcessState);
+            // 调用 ActivityThread.scheduleLaunchActivity加载activity
+            app.thread.scheduleLaunchActivity(new Intent(r.intent), r.appToken,
+                    System.identityHashCode(r), r.info, new Configuration(mService.mConfiguration),
+                    new Configuration(stack.mOverrideConfig), r.compat, r.launchedFromPackage,
+                    task.voiceInteractor, app.repProcState, r.icicle, r.persistentState, results,
+                    newIntents, !andResume, mService.isNextTransitionForward(), profilerInfo);
+
+            if ((app.info.privateFlags&ApplicationInfo.PRIVATE_FLAG_CANT_SAVE_STATE) != 0) {
+                ...............
+            }
+
+        } catch (RemoteException e) {
+          ...............
+        }
+
+        r.launchFailed = false;
+        // 更新activity在其ActivityStack.mLRUActivities中的位置
+        // 移除之前存在的,将其重新插入mLRUActivities末尾
+        if (stack.updateLRUListLocked(r)) {
+            Slog.w(TAG, "Activity " + r
+                  + " being launched, but already in LRU list");
+        }
+
+        if (andResume) {
+            // 该方法中将activity所在的task加入ActivityStack.mRecentTasks中
+            stack.minimalResumeActivityLocked(r);
+        } else {
+        ..................
+        }
+
+        if (isFrontStack(stack)) {
+           //启动系统升级后(或者第一次开机新设备)时设置向导页面
+           // 只会运行一次
+            mService.startSetupActivityLocked();
+        }
+        //进程中有activity了,要更新app进程绑定的service,说不定这些service关心客户端进程中是否存在activity.
+        // 实际上就是设置与之绑定的service进程的ProcessRecord.hasClientActivities为true
+        mService.mServices.updateServiceConnectionActivitiesLocked(r.app);
+
+        return true;
+    }
+
+```
+
+这个方法主要方法调用时序图如下所示:
+
+![][3]
+
+
+### ApplicationThread.scheduleLaunchActivity()方法
+
+```java
+public final void scheduleLaunchActivity(
+        Intent intent,//启动这个activity的intent
+        IBinder token,// window manager token
+        int ident,// 与java.lang.Object.hashCode()一致
+        ActivityInfo info,// 要启动的activity的信息
+        Configuration curConfig, Configuration overrideConfig,
+        CompatibilityInfo compatInfo,// 兼容性
+        String referrer, // 启动这个activity的activity的包名
+        IVoiceInteractor voiceInteractor,
+        int procState,// activity运行所在的进程上一次的状态
+        Bundle state, // 要启动的activity上一次保存的状态,如果是第一次启动,则为null
+        PersistableBundle persistentState,//要启动的activity上一次保存的持续信息的状态,如果是第一次启动,则为null
+        List<ResultInfo> pendingResults,//已经收到的待处返回的结果
+        List<ReferrerIntent> pendingNewIntents,//ams中有可复用的activity，这时候会将新的intent设置到对应activityrecord的newintents属性中
+        boolean notResumed,// 传入false
+        boolean isForward, ProfilerInfo profilerInfo) {
+
+    // 更新VM进程状态
+    updateProcessState(procState, false);
+
+    // 创建ActivityClientRecord对象
+    ActivityClientRecord r = new ActivityClientRecord();
+
+    // 初始化ActivityClientRecord对象
+    r.token = token;
+    r.ident = ident;
+    r.intent = intent;
+    r.referrer = referrer;
+    r.voiceInteractor = voiceInteractor;
+    r.activityInfo = info;
+    r.compatInfo = compatInfo;
+    r.state = state;
+    r.persistentState = persistentState;
+
+    r.pendingResults = pendingResults;
+    r.pendingIntents = pendingNewIntents;
+
+    r.startsNotResumed = notResumed;
+    r.isForward = isForward;
+
+    r.profilerInfo = profilerInfo;
+
+    r.overrideConfig = overrideConfig;
+    updatePendingConfiguration(curConfig);
+
+    // 发送LAUNCH_ACTIVITY消息
+    sendMessage(H.LAUNCH_ACTIVITY, r);
+}
+```
+
+处理消息：
+
+```java
+public void handleMessage(Message msg) {
+    if (DEBUG_MESSAGES) Slog.v(TAG, ">>> handling: " + codeToString(msg.what));
+    switch (msg.what) {
+        case LAUNCH_ACTIVITY: {
+            Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "activityStart");
+            final ActivityClientRecord r = (ActivityClientRecord) msg.obj;
+            // 获取LoadedApk
+            r.packageInfo = getPackageInfoNoCheck(
+                    r.activityInfo.applicationInfo, r.compatInfo);
+            handleLaunchActivity(r, null);
+            Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+        } break;
+        ..........
+```
+
+
+
+### ActivityThread.handleLaunchActivity()方法
+
+```java
+    private void handleLaunchActivity(ActivityClientRecord r, Intent customIntent) {
+
+        ..................
+
+        // Initialize before creating the activity
+        WindowManagerGlobal.initialize();
+        // 启动activity
+        // 主要是加载activity的class，并且实例化一个Activity对象
+        Activity a = performLaunchActivity(r, customIntent);
+        // 调用activity的onResume方法
+        if (a != null) {
+            r.createdConfig = new Configuration(mConfiguration);
+            Bundle oldState = r.state;
+            handleResumeActivity(r.token, false, r.isForward,
+                    !r.activity.mFinished && !r.startsNotResumed);
+
+            if (!r.activity.mFinished && r.startsNotResumed) {
+              ...........
+            }
+        } else {
+            ................
+        }
+    }
+
+```
+
+如下是执行过程：
+
+![][5]
+
+执行完上面的过程后，返回AMS的attachApplicationLocked方法中，开始启动运行在这个进程中的service。以及执行sendPendingBroadcastsLocked()，这些内容后续单独分析。
+
+！[][1]
+
+
+[1]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-21.png
+[2]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-22.png
+[3]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-23.png
+[4]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-24.png
+[5]: http://7xj6ce.com1.z0.glb.clouddn.com/AMS-25.png
